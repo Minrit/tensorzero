@@ -163,7 +163,7 @@ pub fn validate_gepa_config(
             .get(evaluation_name)
             .ok_or_else(|| {
                 Error::new(ErrorDetails::Config {
-                    message: format!("Evaluation '{evaluation_name}' not found in config"),
+                    message: format!("Evaluation `{evaluation_name}` not found in config"),
                 })
             })?
             .clone(),
