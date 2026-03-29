@@ -580,6 +580,7 @@ pub struct CreateDatapointsFromInferencesToolParams {
     pub dataset_name: String,
     /// Parameters specifying which inferences to create datapoints from.
     /// Can be either specific inference IDs or a query to find inferences.
+    #[serde(flatten)]
     pub params: CreateDatapointsFromInferenceRequestParams,
 }
 
