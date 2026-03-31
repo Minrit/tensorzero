@@ -130,7 +130,7 @@ pub enum ContentBlockType {
 #[ts(export)]
 pub struct OpenAIProvider {
     model_name: String,
-    api_base: Option<Url>,
+    api_base: Option<super::helpers::DynamicApiBase>,
     #[serde(skip)]
     credentials: OpenAICredentials,
     include_encrypted_reasoning: bool,
@@ -143,7 +143,7 @@ pub struct OpenAIProvider {
 impl OpenAIProvider {
     pub fn new(
         model_name: String,
-        api_base: Option<Url>,
+        api_base: Option<super::helpers::DynamicApiBase>,
         credentials: OpenAICredentials,
         api_type: OpenAIAPIType,
         include_encrypted_reasoning: bool,
@@ -157,9 +157,10 @@ impl OpenAIProvider {
                         .to_string(),
             }));
         }
-        // Check if the api_base has the `/chat/completions` suffix and warn if it does
         if let Some(api_base) = &api_base {
-            check_api_base_suffix(api_base);
+            if let Some(url) = api_base.as_static() {
+                check_api_base_suffix(url);
+            }
         }
 
         if !provider_tools.is_empty() && !matches!(api_type, OpenAIAPIType::Responses) {
@@ -195,6 +196,17 @@ impl OpenAIProvider {
 
     pub fn provider_tools(&self) -> &[Value] {
         &self.provider_tools
+    }
+
+    /// Resolve the effective api_base URL, falling back to OPENAI_DEFAULT_BASE_URL.
+    fn resolve_api_base(
+        &self,
+        dynamic_api_keys: &InferenceCredentials,
+    ) -> Result<Url, Error> {
+        match &self.api_base {
+            Some(base) => base.resolve(dynamic_api_keys),
+            None => Ok(OPENAI_DEFAULT_BASE_URL.clone()),
+        }
     }
 }
 
@@ -428,13 +440,10 @@ impl InferenceProvider for OpenAIProvider {
         dynamic_api_keys: &'a InferenceCredentials,
         model_provider: &'a ModelProviderRequestInfo,
     ) -> Result<ProviderInferenceResponse, Error> {
+        let resolved_base = self.resolve_api_base(dynamic_api_keys)?;
         let request_url = match self.api_type {
-            OpenAIAPIType::Responses => {
-                get_responses_url(self.api_base.as_ref().unwrap_or(&OPENAI_DEFAULT_BASE_URL))?
-            }
-            OpenAIAPIType::ChatCompletions => {
-                get_chat_url(self.api_base.as_ref().unwrap_or(&OPENAI_DEFAULT_BASE_URL))?
-            }
+            OpenAIAPIType::Responses => get_responses_url(&resolved_base)?,
+            OpenAIAPIType::ChatCompletions => get_chat_url(&resolved_base)?,
         };
         let api_key = self
             .credentials
@@ -591,12 +600,12 @@ impl InferenceProvider for OpenAIProvider {
             .credentials
             .get_api_key(dynamic_api_keys)
             .map_err(|e| e.log())?;
+        let resolved_base = self.resolve_api_base(dynamic_api_keys)?;
         let start_time = Instant::now();
 
         match self.api_type {
             OpenAIAPIType::Responses => {
-                let request_url =
-                    get_responses_url(self.api_base.as_ref().unwrap_or(&OPENAI_DEFAULT_BASE_URL))?;
+                let request_url = get_responses_url(&resolved_base)?;
 
                 let request_body = serde_json::to_value(
                     OpenAIResponsesRequest::new(
@@ -660,8 +669,7 @@ impl InferenceProvider for OpenAIProvider {
             }
             OpenAIAPIType::ChatCompletions => {
                 // Use Chat Completions API for streaming
-                let request_url =
-                    get_chat_url(self.api_base.as_ref().unwrap_or(&OPENAI_DEFAULT_BASE_URL))?;
+                let request_url = get_chat_url(&resolved_base)?;
 
                 let request_body = serde_json::to_value(
                     OpenAIRequest::new(
@@ -734,6 +742,7 @@ impl InferenceProvider for OpenAIProvider {
             .credentials
             .get_api_key(dynamic_api_keys)
             .map_err(|e| e.log())?;
+        let resolved_base = self.resolve_api_base(dynamic_api_keys)?;
         let mut batch_requests = Vec::with_capacity(requests.len());
         for request in requests {
             batch_requests.push(
@@ -753,14 +762,13 @@ impl InferenceProvider for OpenAIProvider {
             &batch_requests,
             client,
             api_key,
-            self.api_base.as_ref().unwrap_or(&OPENAI_DEFAULT_BASE_URL),
+            &resolved_base,
             "batch".to_string(),
         )
         .await?;
         let batch_request = OpenAIBatchRequest::new(&file_id);
         let raw_request = serde_json::to_string(&batch_request).map_err(|_| Error::new(ErrorDetails::Serialization { message: "Error serializing OpenAI batch request. This should never happen. Please file a bug report: https://github.com/tensorzero/tensorzero/issues/new".to_string() }))?;
-        let request_url =
-            get_batch_url(self.api_base.as_ref().unwrap_or(&OPENAI_DEFAULT_BASE_URL))?;
+        let request_url = get_batch_url(&resolved_base)?;
         let mut request_builder = client.post(request_url);
         if let Some(api_key) = api_key {
             request_builder = request_builder.bearer_auth(api_key.expose_secret());
@@ -853,8 +861,8 @@ impl InferenceProvider for OpenAIProvider {
     ) -> Result<PollBatchInferenceResponse, Error> {
         let api_type: ApiType = self.api_type.into();
         let batch_params = OpenAIBatchParams::from_ref(&batch_request.batch_params)?;
-        let mut request_url =
-            get_batch_url(self.api_base.as_ref().unwrap_or(&OPENAI_DEFAULT_BASE_URL))?;
+        let resolved_base = self.resolve_api_base(dynamic_api_keys)?;
+        let mut request_url = get_batch_url(&resolved_base)?;
         request_url
             .path_segments_mut()
             .map_err(|()| {
@@ -1014,8 +1022,8 @@ impl EmbeddingProvider for OpenAIProvider {
             request.dimensions,
             request.encoding_format,
         );
-        let request_url =
-            get_embedding_url(self.api_base.as_ref().unwrap_or(&OPENAI_DEFAULT_BASE_URL))?;
+        let resolved_base = self.resolve_api_base(dynamic_api_keys)?;
+        let request_url = get_embedding_url(&resolved_base)?;
         let start_time = Instant::now();
         let mut request_builder = client.post(request_url);
         if let Some(api_key) = api_key {
@@ -1199,10 +1207,8 @@ impl OpenAIProvider {
         raw_request: String,
         raw_response: String,
     ) -> Result<ProviderBatchInferenceResponse, Error> {
-        let file_url = get_file_url(
-            self.api_base.as_ref().unwrap_or(&OPENAI_DEFAULT_BASE_URL),
-            Some(file_id),
-        )?;
+        let resolved_base = self.resolve_api_base(credentials)?;
+        let file_url = get_file_url(&resolved_base, Some(file_id))?;
         let api_key = self
             .credentials
             .get_api_key(credentials)
@@ -5301,10 +5307,12 @@ mod tests {
         let logs_contain = capture_logs();
         let model_name = "test-model".to_string();
 
+        use super::super::helpers::DynamicApiBase;
+
         // Valid cases (should not warn)
         let _ = OpenAIProvider::new(
             model_name.clone(),
-            Some(Url::parse("http://localhost:1234/v1/").unwrap()),
+            Some(DynamicApiBase::Static(Url::parse("http://localhost:1234/v1/").unwrap())),
             OpenAICredentials::None,
             OpenAIAPIType::ChatCompletions,
             false,
@@ -5314,7 +5322,7 @@ mod tests {
 
         let _ = OpenAIProvider::new(
             model_name.clone(),
-            Some(Url::parse("http://localhost:1234/v1").unwrap()),
+            Some(DynamicApiBase::Static(Url::parse("http://localhost:1234/v1").unwrap())),
             OpenAICredentials::None,
             OpenAIAPIType::ChatCompletions,
             false,
@@ -5326,7 +5334,7 @@ mod tests {
         let invalid_url_1 = Url::parse("http://localhost:1234/chat/completions").unwrap();
         let _ = OpenAIProvider::new(
             model_name.clone(),
-            Some(invalid_url_1.clone()),
+            Some(DynamicApiBase::Static(invalid_url_1.clone())),
             OpenAICredentials::None,
             OpenAIAPIType::ChatCompletions,
             false,
@@ -5339,7 +5347,7 @@ mod tests {
         let invalid_url_2 = Url::parse("http://localhost:1234/v1/chat/completions/").unwrap();
         let _ = OpenAIProvider::new(
             model_name.clone(),
-            Some(invalid_url_2.clone()),
+            Some(DynamicApiBase::Static(invalid_url_2.clone())),
             OpenAICredentials::None,
             OpenAIAPIType::ChatCompletions,
             false,
