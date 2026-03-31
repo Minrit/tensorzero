@@ -1717,7 +1717,7 @@ pub enum UninitializedProviderConfig {
     Anthropic {
         model_name: String,
         #[cfg_attr(feature = "ts-bindings", ts(type = "string | null"))]
-        api_base: Option<Url>,
+        api_base: Option<CredentialLocationOrHardcoded>,
         #[cfg_attr(feature = "ts-bindings", ts(type = "string | null"))]
         api_key_location: Option<CredentialLocationWithFallback>,
         #[serde(default)]
@@ -1831,7 +1831,8 @@ pub enum UninitializedProviderConfig {
     },
     OpenAI {
         model_name: String,
-        api_base: Option<Url>,
+        #[cfg_attr(feature = "ts-bindings", ts(type = "string | null"))]
+        api_base: Option<CredentialLocationOrHardcoded>,
         #[cfg_attr(feature = "ts-bindings", ts(type = "string | null"))]
         api_key_location: Option<CredentialLocationWithFallback>,
         #[serde(default)]
@@ -2182,6 +2183,14 @@ impl UninitializedProviderConfig {
                         "The 'beta_structured_outputs' field is no longer necessary for `anthropic` providers",
                     );
                 }
+                let api_base = api_base
+                    .map(|loc| {
+                        crate::providers::helpers::DynamicApiBase::from_credential_location(
+                            loc,
+                            "anthropic",
+                        )
+                    })
+                    .transpose()?;
                 ProviderConfig::Anthropic(AnthropicProvider::new(
                     model_name,
                     api_base,
@@ -2415,8 +2424,18 @@ impl UninitializedProviderConfig {
                 provider_tools,
                 content_type_overrides,
             } => {
-                // Use mock API base for testing if set, otherwise defer to the API base set
-                let api_base = get_mock_provider_api_base("openai").or(api_base);
+                // Use mock API base for testing if set, otherwise resolve from config
+                let api_base = if let Some(mock_url) = get_mock_provider_api_base("openai") {
+                    Some(crate::providers::helpers::DynamicApiBase::Static(mock_url))
+                } else {
+                    api_base
+                        .map(|loc| {
+                            crate::providers::helpers::DynamicApiBase::from_credential_location(
+                                loc, "openai",
+                            )
+                        })
+                        .transpose()?
+                };
 
                 ProviderConfig::OpenAI(OpenAIProvider::new(
                     model_name,

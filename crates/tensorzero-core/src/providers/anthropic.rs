@@ -130,7 +130,7 @@ fn get_messages_url(base_url: &Url) -> Result<Url, Error> {
 #[cfg_attr(feature = "ts-bindings", ts(export))]
 pub struct AnthropicProvider {
     model_name: String,
-    api_base: Option<Url>,
+    api_base: Option<super::helpers::DynamicApiBase>,
     #[serde(skip)]
     credentials: AnthropicCredentials,
     provider_tools: Vec<Value>,
@@ -139,19 +139,22 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     pub fn new(
         model_name: String,
-        api_base: Option<Url>,
+        api_base: Option<super::helpers::DynamicApiBase>,
         credentials: AnthropicCredentials,
         provider_tools: Vec<Value>,
     ) -> Self {
-        // Check and normalize api_base if provided
-        let normalized_api_base = api_base.map(|url| {
-            check_api_base_suffix(&url);
-            normalize_api_base(url)
+        // Check and normalize api_base if statically known
+        let api_base = api_base.map(|base| match base {
+            super::helpers::DynamicApiBase::Static(url) => {
+                check_api_base_suffix(&url);
+                super::helpers::DynamicApiBase::Static(normalize_api_base(url))
+            }
+            dynamic => dynamic,
         });
 
         AnthropicProvider {
             model_name,
-            api_base: normalized_api_base,
+            api_base,
             credentials,
             provider_tools,
         }
@@ -165,14 +168,18 @@ impl AnthropicProvider {
         &self.provider_tools
     }
 
-    fn base_url(&self) -> &Url {
-        self.api_base
-            .as_ref()
-            .unwrap_or(&ANTHROPIC_DEFAULT_BASE_URL)
-    }
-
-    fn messages_url(&self) -> Result<Url, Error> {
-        get_messages_url(self.base_url())
+    /// Resolve the effective api_base URL at inference time, falling back to ANTHROPIC_DEFAULT_BASE_URL.
+    fn resolve_base_url(
+        &self,
+        dynamic_api_keys: &InferenceCredentials,
+    ) -> Result<Url, Error> {
+        match &self.api_base {
+            Some(base) => {
+                let url = base.resolve(dynamic_api_keys)?;
+                Ok(normalize_api_base(url))
+            }
+            None => Ok(ANTHROPIC_DEFAULT_BASE_URL.clone()),
+        }
     }
 }
 
@@ -294,7 +301,8 @@ impl InferenceProvider for AnthropicProvider {
             .get_api_key(dynamic_api_keys)
             .map_err(|e| e.log())?;
         let start_time = Instant::now();
-        let request_url = self.messages_url()?;
+        let resolved_base = self.resolve_base_url(dynamic_api_keys)?;
+        let request_url = get_messages_url(&resolved_base)?;
         let builder = http_client
             .post(request_url.as_ref())
             .header("anthropic-version", ANTHROPIC_API_VERSION)
@@ -400,8 +408,9 @@ impl InferenceProvider for AnthropicProvider {
             })
         })?;
         let start_time = Instant::now();
+        let resolved_base = self.resolve_base_url(api_key)?;
         let api_key = self.credentials.get_api_key(api_key).map_err(|e| e.log())?;
-        let request_url = self.messages_url()?;
+        let request_url = get_messages_url(&resolved_base)?;
         let builder = http_client
             .post(request_url.as_ref())
             .header("anthropic-version", ANTHROPIC_API_VERSION)
@@ -3356,23 +3365,25 @@ mod tests {
 
     #[test]
     fn test_anthropic_provider_custom_api_base() {
+        use crate::providers::helpers::DynamicApiBase;
         let custom_url = Url::parse("https://example.com/custom/").unwrap();
         let provider = AnthropicProvider::new(
             "claude".to_string(),
-            Some(custom_url.clone()),
+            Some(DynamicApiBase::Static(custom_url.clone())),
             AnthropicCredentials::None,
             vec![],
         );
 
+        let empty_creds = InferenceCredentials::default();
+        let resolved = provider.resolve_base_url(&empty_creds).unwrap();
         assert_eq!(
-            provider.base_url(),
-            &custom_url,
+            resolved, custom_url,
             "Custom api_base should be stored as-is"
         );
         assert_eq!(
-            provider.messages_url().unwrap().as_str(),
+            get_messages_url(&resolved).unwrap().as_str(),
             "https://example.com/custom/messages",
-            "messages_url() should append /messages to custom base URL"
+            "messages_url should append /messages to custom base URL"
         );
     }
 
@@ -3385,13 +3396,15 @@ mod tests {
             vec![],
         );
 
+        let empty_creds = InferenceCredentials::default();
+        let resolved = provider.resolve_base_url(&empty_creds).unwrap();
         assert_eq!(
-            provider.base_url().as_str(),
+            resolved.as_str(),
             "https://api.anthropic.com/v1/",
             "Default base URL should be the API root"
         );
         assert_eq!(
-            provider.messages_url().unwrap().as_str(),
+            get_messages_url(&resolved).unwrap().as_str(),
             "https://api.anthropic.com/v1/messages",
             "messages_url() should return URL with /messages appended"
         );
@@ -3499,30 +3512,29 @@ mod tests {
     fn test_anthropic_provider_normalizes_api_base_with_messages() {
         let logs_contain = capture_logs();
 
-        // Create provider with api_base that includes /messages
+        use crate::providers::helpers::DynamicApiBase;
         let url_with_messages = Url::parse("https://example.com/v1/messages").unwrap();
         let provider = AnthropicProvider::new(
             "claude".to_string(),
-            Some(url_with_messages),
+            Some(DynamicApiBase::Static(url_with_messages)),
             AnthropicCredentials::None,
             vec![],
         );
 
-        // Verify the stored api_base is normalized
+        let empty_creds = InferenceCredentials::default();
+        let resolved = provider.resolve_base_url(&empty_creds).unwrap();
         assert_eq!(
-            provider.base_url().as_str(),
+            resolved.as_str(),
             "https://example.com/v1/",
             "Provider should store normalized base URL without /messages"
         );
 
-        // Verify messages_url() returns the correct full URL
         assert_eq!(
-            provider.messages_url().unwrap().as_str(),
+            get_messages_url(&resolved).unwrap().as_str(),
             "https://example.com/v1/messages",
-            "messages_url() should return URL with /messages appended"
+            "messages_url should return URL with /messages appended"
         );
 
-        // Verify deprecation warning was emitted
         assert!(
             logs_contain("Deprecation Warning"),
             "Should emit deprecation warning when api_base includes /messages"

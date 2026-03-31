@@ -1,9 +1,11 @@
 use axum::http;
 use bytes::Bytes;
 use futures::{Stream, stream::Peekable};
+use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, map::Entry};
 use std::{collections::HashMap, pin::Pin};
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
@@ -1037,6 +1039,141 @@ impl<T> UrlParseErrExt<T> for Result<T, url::ParseError> {
                 ),
             })
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DynamicApiBase — Static/Dynamic api_base for OpenAI-compatible providers
+// ---------------------------------------------------------------------------
+
+/// API base URL configuration supporting both static (hardcoded/env) and
+/// per-request dynamic resolution via `dynamic::KEY_NAME` in config.
+#[derive(Clone, Debug)]
+pub enum DynamicApiBase {
+    Static(Url),
+    Dynamic(String),
+}
+
+impl DynamicApiBase {
+    /// Build from a `CredentialLocationOrHardcoded` parsed from TOML config.
+    pub fn from_credential_location(
+        location: crate::model::CredentialLocationOrHardcoded,
+        provider_type: &str,
+    ) -> Result<Self, Error> {
+        use crate::model::{CredentialLocation, CredentialLocationOrHardcoded};
+        match location {
+            CredentialLocationOrHardcoded::Hardcoded(url_str) => {
+                let url = Url::parse(&url_str).map_err(|e| {
+                    Error::new(ErrorDetails::Config {
+                        message: format!(
+                            "Invalid `api_base` URL for `{provider_type}` provider: {e}"
+                        ),
+                    })
+                })?;
+                Ok(DynamicApiBase::Static(url))
+            }
+            CredentialLocationOrHardcoded::Location(loc) => match loc {
+                CredentialLocation::Env(env_var) => {
+                    let url_str = std::env::var(&env_var).map_err(|_| {
+                        Error::new(ErrorDetails::Config {
+                            message: format!(
+                                "Environment variable `{env_var}` not found for `api_base` of `{provider_type}` provider."
+                            ),
+                        })
+                    })?;
+                    let url = Url::parse(&url_str).map_err(|e| {
+                        Error::new(ErrorDetails::Config {
+                            message: format!(
+                                "Invalid URL in env `{env_var}` for `api_base` of `{provider_type}`: {e}"
+                            ),
+                        })
+                    })?;
+                    Ok(DynamicApiBase::Static(url))
+                }
+                CredentialLocation::Path(path) => {
+                    let url_str = std::fs::read_to_string(&path).map_err(|e| {
+                        Error::new(ErrorDetails::Config {
+                            message: format!(
+                                "Failed to read `api_base` from file `{path}` for `{provider_type}`: {e}"
+                            ),
+                        })
+                    })?;
+                    let url = Url::parse(url_str.trim()).map_err(|e| {
+                        Error::new(ErrorDetails::Config {
+                            message: format!(
+                                "Invalid URL in file `{path}` for `api_base` of `{provider_type}`: {e}"
+                            ),
+                        })
+                    })?;
+                    Ok(DynamicApiBase::Static(url))
+                }
+                CredentialLocation::Dynamic(key_name) => {
+                    tracing::warn!(
+                        "Dynamic `api_base` configured for `{provider_type}` provider. \
+                         Only use this with trusted clients — an untrusted client could \
+                         exfiltrate credentials via a malicious endpoint."
+                    );
+                    Ok(DynamicApiBase::Dynamic(key_name))
+                }
+                CredentialLocation::None => {
+                    Err(Error::new(ErrorDetails::Config {
+                        message: format!(
+                            "`api_base = \"none\"` is not supported for `{provider_type}`. \
+                             Omit the field to use the default, or specify a URL."
+                        ),
+                    }))
+                }
+                other => {
+                    Err(Error::new(ErrorDetails::Config {
+                        message: format!(
+                            "Unsupported credential location `{other:?}` for `api_base` of `{provider_type}` provider."
+                        ),
+                    }))
+                }
+            },
+        }
+    }
+
+    /// Resolve the api_base URL at inference time.
+    pub fn resolve(
+        &self,
+        credentials: &crate::endpoints::inference::InferenceCredentials,
+    ) -> Result<Url, Error> {
+        match self {
+            DynamicApiBase::Static(url) => Ok(url.clone()),
+            DynamicApiBase::Dynamic(key_name) => {
+                let url_str = credentials.get(key_name).ok_or_else(|| {
+                    Error::new(ErrorDetails::DynamicEndpointNotFound {
+                        key_name: key_name.clone(),
+                    })
+                })?;
+                Url::parse(url_str.expose_secret()).map_err(|_| {
+                    Error::new(ErrorDetails::InvalidDynamicEndpoint {
+                        url: url_str.expose_secret().to_string(),
+                    })
+                })
+            }
+        }
+    }
+
+    /// Return the URL if statically known (for backward-compatible call sites).
+    pub fn as_static(&self) -> Option<&Url> {
+        match self {
+            DynamicApiBase::Static(url) => Some(url),
+            DynamicApiBase::Dynamic(_) => None,
+        }
+    }
+}
+
+impl serde::Serialize for DynamicApiBase {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            DynamicApiBase::Static(url) => url.serialize(serializer),
+            DynamicApiBase::Dynamic(key) => serializer.serialize_str(&format!("dynamic::{key}")),
+        }
     }
 }
 
@@ -2141,5 +2278,62 @@ mod tests {
             headers.get("X-Custom-Header-2").unwrap().to_str().unwrap(),
             "test-value-2"
         );
+    }
+
+    // ===== DynamicApiBase tests =====
+
+    #[test]
+    fn test_dynamic_api_base_resolve_static() {
+        let url = Url::parse("https://api.deepseek.com/v1").unwrap();
+        let base = DynamicApiBase::Static(url.clone());
+        let creds = crate::endpoints::inference::InferenceCredentials::default();
+        let result = base.resolve(&creds).unwrap();
+        assert_eq!(result, url);
+    }
+
+    #[test]
+    fn test_dynamic_api_base_resolve_dynamic_found() {
+        let base = DynamicApiBase::Dynamic("provider_api_base".to_string());
+        let mut creds = crate::endpoints::inference::InferenceCredentials::default();
+        creds.insert(
+            "provider_api_base".to_string(),
+            secrecy::SecretString::new("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
+        );
+        let result = base.resolve(&creds).unwrap();
+        assert_eq!(
+            result.as_str(),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_api_base_resolve_dynamic_not_found() {
+        let base = DynamicApiBase::Dynamic("missing_key".to_string());
+        let creds = crate::endpoints::inference::InferenceCredentials::default();
+        let result = base.resolve(&creds);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing_key"));
+    }
+
+    #[test]
+    fn test_dynamic_api_base_resolve_dynamic_invalid_url() {
+        let base = DynamicApiBase::Dynamic("bad_url".to_string());
+        let mut creds = crate::endpoints::inference::InferenceCredentials::default();
+        creds.insert(
+            "bad_url".to_string(),
+            secrecy::SecretString::new("not-a-valid-url".into()),
+        );
+        let result = base.resolve(&creds);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dynamic_api_base_as_static() {
+        let url = Url::parse("https://api.example.com/v1").unwrap();
+        let static_base = DynamicApiBase::Static(url.clone());
+        assert_eq!(static_base.as_static(), Some(&url));
+
+        let dynamic_base = DynamicApiBase::Dynamic("key".to_string());
+        assert_eq!(dynamic_base.as_static(), None);
     }
 }
