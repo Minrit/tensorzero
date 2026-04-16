@@ -46,7 +46,7 @@ pub struct StoredModelProvider {
 pub enum StoredProviderConfig {
     Anthropic {
         model_name: String,
-        api_base: Option<String>,
+        api_base: Option<StoredCredentialLocationOrHardcoded>,
         api_key_location: Option<StoredCredentialLocationWithFallback>,
         beta_structured_outputs: Option<bool>,
         provider_tools: Option<Vec<Value>>,
@@ -123,7 +123,7 @@ pub enum StoredProviderConfig {
     },
     OpenAI {
         model_name: String,
-        api_base: Option<String>,
+        api_base: Option<StoredCredentialLocationOrHardcoded>,
         api_key_location: Option<StoredCredentialLocationWithFallback>,
         api_type: Option<StoredOpenAIAPIType>,
         include_encrypted_reasoning: Option<bool>,
