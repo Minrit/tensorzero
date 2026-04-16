@@ -331,17 +331,6 @@ impl From<&ContentBlockType> for StoredContentBlockType {
     }
 }
 
-fn parse_optional_url(url: Option<String>, field_name: &str) -> Result<Option<Url>, Error> {
-    url.map(|u| {
-        u.parse::<Url>().map_err(|e| {
-            Error::new(ErrorDetails::Config {
-                message: format!("Failed to parse `{field_name}` URL: {e}"),
-            })
-        })
-    })
-    .transpose()
-}
-
 fn parse_url(url: String, field_name: &str) -> Result<Url, Error> {
     url.parse::<Url>().map_err(|e| {
         Error::new(ErrorDetails::Config {
@@ -363,7 +352,7 @@ impl TryFrom<StoredProviderConfig> for UninitializedProviderConfig {
                 provider_tools,
             } => Ok(Self::Anthropic {
                 model_name,
-                api_base: parse_optional_url(api_base, "api_base")?,
+                api_base: api_base.map(CredentialLocationOrHardcoded::from),
                 api_key_location: api_key_location.map(CredentialLocationWithFallback::from),
                 beta_structured_outputs,
                 provider_tools: provider_tools.unwrap_or_default(),
@@ -494,7 +483,7 @@ impl TryFrom<StoredProviderConfig> for UninitializedProviderConfig {
                 content_type_overrides,
             } => Ok(Self::OpenAI {
                 model_name,
-                api_base: parse_optional_url(api_base, "api_base")?,
+                api_base: api_base.map(CredentialLocationOrHardcoded::from),
                 api_key_location: api_key_location.map(CredentialLocationWithFallback::from),
                 api_type: api_type.map(OpenAIAPIType::from).unwrap_or_default(),
                 include_encrypted_reasoning: include_encrypted_reasoning.unwrap_or_default(),
@@ -1903,7 +1892,9 @@ impl From<&UninitializedProviderConfig> for StoredProviderConfig {
                 provider_tools,
             } => StoredProviderConfig::Anthropic {
                 model_name: model_name.clone(),
-                api_base: api_base.as_ref().map(ToString::to_string),
+                api_base: api_base
+                    .as_ref()
+                    .map(StoredCredentialLocationOrHardcoded::from),
                 api_key_location: api_key_location
                     .as_ref()
                     .map(StoredCredentialLocationWithFallback::from),
@@ -2064,7 +2055,9 @@ impl From<&UninitializedProviderConfig> for StoredProviderConfig {
                 content_type_overrides,
             } => StoredProviderConfig::OpenAI {
                 model_name: model_name.clone(),
-                api_base: api_base.as_ref().map(ToString::to_string),
+                api_base: api_base
+                    .as_ref()
+                    .map(StoredCredentialLocationOrHardcoded::from),
                 api_key_location: api_key_location
                     .as_ref()
                     .map(StoredCredentialLocationWithFallback::from),
@@ -5142,8 +5135,8 @@ mod tests {
             ExtraBodyConfig, ExtraBodyReplacement, ExtraBodyReplacementKind,
         };
         use crate::model::{
-            CredentialLocation, CredentialLocationWithFallback, UninitializedModelConfig,
-            UninitializedModelProvider, UninitializedProviderConfig,
+            CredentialLocation, CredentialLocationOrHardcoded, CredentialLocationWithFallback,
+            UninitializedModelConfig, UninitializedModelProvider, UninitializedProviderConfig,
         };
         use crate::providers::openai::OpenAIAPIType;
 
@@ -5202,10 +5195,50 @@ mod tests {
         }
 
         #[gtest]
+        fn test_provider_config_openai_round_trip_with_dynamic_api_base() {
+            let original = UninitializedProviderConfig::OpenAI {
+                model_name: "gpt-4o".to_string(),
+                api_base: Some(CredentialLocationOrHardcoded::Location(
+                    CredentialLocation::Dynamic("provider_api_base".to_string()),
+                )),
+                api_key_location: Some(CredentialLocationWithFallback::Single(
+                    CredentialLocation::Env("OPENAI_API_KEY".to_string()),
+                )),
+                api_type: OpenAIAPIType::ChatCompletions,
+                include_encrypted_reasoning: false,
+                provider_tools: vec![],
+                content_type_overrides: HashMap::new(),
+            };
+            let stored = StoredProviderConfig::from(&original);
+            let restored: UninitializedProviderConfig =
+                stored.try_into().expect("should convert back");
+            expect_that!(restored, eq(&original));
+        }
+
+        #[gtest]
         fn test_provider_config_anthropic_round_trip() {
             let original = UninitializedProviderConfig::Anthropic {
                 model_name: "claude-sonnet-4-20250514".to_string(),
                 api_base: None,
+                api_key_location: Some(CredentialLocationWithFallback::Single(
+                    CredentialLocation::Env("ANTHROPIC_API_KEY".to_string()),
+                )),
+                beta_structured_outputs: Some(true),
+                provider_tools: vec![],
+            };
+            let stored = StoredProviderConfig::from(&original);
+            let restored: UninitializedProviderConfig =
+                stored.try_into().expect("should convert back");
+            expect_that!(restored, eq(&original));
+        }
+
+        #[gtest]
+        fn test_provider_config_anthropic_round_trip_with_dynamic_api_base() {
+            let original = UninitializedProviderConfig::Anthropic {
+                model_name: "claude-sonnet-4-20250514".to_string(),
+                api_base: Some(CredentialLocationOrHardcoded::Location(
+                    CredentialLocation::Dynamic("provider_api_base".to_string()),
+                )),
                 api_key_location: Some(CredentialLocationWithFallback::Single(
                     CredentialLocation::Env("ANTHROPIC_API_KEY".to_string()),
                 )),
