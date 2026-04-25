@@ -1048,7 +1048,8 @@ impl<T> UrlParseErrExt<T> for Result<T, url::ParseError> {
 
 /// API base URL configuration supporting both static (hardcoded/env) and
 /// per-request dynamic resolution via `dynamic::KEY_NAME` in config.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, ts_rs::TS)]
+#[ts(export, type = "string")]
 pub enum DynamicApiBase {
     Static(Url),
     Dynamic(String),
