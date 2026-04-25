@@ -4,6 +4,8 @@ target-rust-analyzer
 **/target
 **/build
 **/dist
+!dist/
+!dist/**
 **/.venv
 **/node_modules
 **/.env*

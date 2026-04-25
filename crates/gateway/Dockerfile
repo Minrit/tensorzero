@@ -18,6 +18,8 @@ ARG CARGO_BUILD_FLAGS
 ARG PROFILE
 WORKDIR /tensorzero
 ENV CARGO_INCREMENTAL=0
+ENV SKIP_TSC_VALIDATION=1
+ARG CACHEBUST=1
 RUN apt-get update && apt-get install -y clang libc++-dev && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /app/crates/recipe.json /tensorzero/crates/recipe.json
 COPY crates/rust-toolchain.toml /tensorzero/crates/rust-toolchain.toml

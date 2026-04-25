@@ -1,0 +1,37 @@
+# TensorZero gateway runtime image that packages a prebuilt Linux binary.
+#
+# Build the binary first with scripts/build-gateway-prebuilt.sh, then package:
+#
+#   scripts/build-gateway-prebuilt.sh linux-arm64
+#   docker buildx build --platform linux/arm64 \
+#     -f crates/gateway/Dockerfile.prebuilt \
+#     --build-arg GIT_COMMIT="$(git rev-parse --short HEAD)" \
+#     -t lobsterpool/tensorzero-gateway:dynamic-api-base \
+#     --load .
+#
+# The expected binary path is selected from TARGETARCH:
+#   linux/arm64 -> dist/gateway-linux-arm64
+#   linux/amd64 -> dist/gateway-linux-amd64
+
+FROM debian:trixie-slim AS base
+
+ARG TARGETARCH
+ARG GIT_COMMIT=unknown
+
+LABEL git.commit=${GIT_COMMIT}
+
+RUN apt-get update && apt-get install -y ca-certificates openssl wget && rm -rf /var/lib/apt/lists/*
+
+FROM base AS gateway
+
+RUN useradd -m -s /bin/bash gateway
+
+USER gateway
+
+COPY dist/gateway-linux-${TARGETARCH} /usr/local/bin/gateway
+
+WORKDIR /app
+
+EXPOSE 3000
+
+ENTRYPOINT ["gateway"]

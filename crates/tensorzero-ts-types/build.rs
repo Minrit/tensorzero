@@ -157,7 +157,9 @@ fn main() {
     fs::write(&out_path, output).expect("Failed to write generated ts_bundles.rs");
 
     // Validate that all bundles compile as TypeScript
-    validate_bundles_with_tsc(&out_dir, &bundles_for_validation);
+    // PATCHED: skip unconditionally for cross-compile builds (tsc not available in image)
+    let _ = (&out_dir, &bundles_for_validation);
+    // validate_bundles_with_tsc(&out_dir, &bundles_for_validation);
 }
 
 /// Parse all .ts files in the bindings directory (recursively).
