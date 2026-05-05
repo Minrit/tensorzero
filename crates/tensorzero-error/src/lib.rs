@@ -29,6 +29,12 @@ use tensorzero_types::rate_limiting_types::{FailedRateLimit, RateLimitingConfigS
 pub mod delayed_error;
 pub use delayed_error::DelayedError;
 
+struct LpProviderErrorFacts<'a> {
+    provider_type: Option<&'a str>,
+    api_type: Option<ApiType>,
+    stream_phase: &'static str,
+}
+
 const RUN_MIGRATIONS_COMMAND: &str = "Please see our documentation to learn more about deploying ClickHouse: https://www.tensorzero.com/docs/deployment/clickhouse";
 
 /// Controls whether to include raw request/response details in error output
@@ -280,6 +286,58 @@ impl Error {
         self.details.extract_raw_chunk()
     }
 
+    fn tensorzero_error_envelope_v1(&self, raw_included: bool) -> Value {
+        let facts = self.details.lp_provider_error_facts();
+        let error_kind = serde_json::to_value(self.get_details())
+            .ok()
+            .and_then(|value| {
+                value
+                    .as_object()
+                    .and_then(|object| object.keys().next().cloned())
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+        let underlying_status_code = self.underlying_status_code().map(|code| code.as_u16());
+        let raw_available = raw_included
+            || self.extract_raw_response().is_some()
+            || self.extract_raw_chunk().is_some();
+
+        json!({
+            "schemaVersion": "llm.error.v1",
+            "source": self.details.lp_error_source(),
+            "tensorzero": {
+                "errorKind": error_kind,
+                "wrapperStatusCode": self.status_code().as_u16(),
+                "underlyingStatusCode": underlying_status_code,
+                "providerType": facts.as_ref().and_then(|facts| facts.provider_type),
+                "apiType": facts.as_ref().and_then(|facts| facts.api_type).map(|api_type| json!(api_type)).unwrap_or(Value::Null),
+                "streamPhase": facts
+                    .as_ref()
+                    .map(|facts| facts.stream_phase)
+                    .unwrap_or("non_stream"),
+                "retryable": self.is_retryable(),
+            },
+            "upstream": {
+                "statusCode": underlying_status_code,
+                "requestId": Value::Null,
+            },
+            "raw": {
+                "available": raw_available,
+                "included": raw_included,
+            },
+        })
+    }
+
+    fn mark_tensorzero_error_raw_included(body: &mut Value, openai_format: bool) {
+        let pointer = if openai_format {
+            "/error/tensorzero_error_json/raw/included"
+        } else {
+            "/tensorzero_error_json/raw/included"
+        };
+        if let Some(included) = body.pointer_mut(pointer) {
+            *included = Value::Bool(true);
+        }
+    }
+
     /// Builds an HTTP error response, optionally including raw response entries from failed providers.
     #[cfg(feature = "axum")]
     pub fn into_response_with_raw_entries(
@@ -315,6 +373,7 @@ impl Error {
                 "raw_chunk"
             };
             body[key] = Value::String(raw_chunk);
+            Self::mark_tensorzero_error_raw_included(&mut body, openai_format);
         }
         body
     }
@@ -324,7 +383,10 @@ impl Error {
     /// When `openai_format` is true, returns `{"error": {"message": "..."}}` (OpenAI-compatible).
     /// When `openai_format` is false, returns `{"error": "..."}` (TensorZero default).
     ///
-    /// If `unstable_error_json` is enabled, includes structured error details as `error_json` and `tensorzero_error_json`.
+    /// OpenAI-compatible responses always include `tensorzero_error_json` so
+    /// downstream gateways can classify upstream failures without parsing
+    /// provider text. If `unstable_error_json` is enabled, the deprecated
+    /// `error_json` alias is also included.
     ///
     /// If `raw_response` is `Some`, includes the raw response entries in the body.
     pub fn build_response_body(
@@ -338,14 +400,17 @@ impl Error {
         } else {
             json!({"error": message})
         };
+        let legacy_error_json =
+            serde_json::to_value(self.get_details()).unwrap_or_else(|e| json!(e.to_string()));
+        if openai_format {
+            body["error"]["tensorzero_error_json"] =
+                self.tensorzero_error_envelope_v1(raw_response.as_ref().is_some());
+        }
         if *UNSTABLE_ERROR_JSON.get().unwrap_or(&false) {
-            let error_json =
-                serde_json::to_value(self.get_details()).unwrap_or_else(|e| json!(e.to_string()));
             if openai_format {
-                body["error"]["error_json"] = error_json.clone(); // DEPRECATED (#5821 / 2026.4+)
-                body["error"]["tensorzero_error_json"] = error_json;
+                body["error"]["error_json"] = legacy_error_json; // DEPRECATED (#5821 / 2026.4+)
             } else {
-                body["error_json"] = error_json;
+                body["error_json"] = legacy_error_json;
             }
         }
         if let Some(entries) = raw_response {
@@ -1257,6 +1322,94 @@ impl ErrorDetails {
                 .iter()
                 .any(|(_, error)| error.is_retryable()),
             _ => true,
+        }
+    }
+
+    fn lp_provider_error_facts(&self) -> Option<LpProviderErrorFacts<'_>> {
+        match self {
+            ErrorDetails::AllRetriesFailed { errors } => errors
+                .last()
+                .and_then(|error| error.get_details().lp_provider_error_facts()),
+            ErrorDetails::AllVariantsFailed { errors } => errors
+                .values()
+                .last()
+                .and_then(|error| error.get_details().lp_provider_error_facts()),
+            ErrorDetails::AllCandidatesFailed { candidate_errors } => candidate_errors
+                .values()
+                .last()
+                .and_then(|error| error.get_details().lp_provider_error_facts()),
+            ErrorDetails::AllModelProvidersFailed { provider_errors } => provider_errors
+                .values()
+                .last()
+                .and_then(|error| error.get_details().lp_provider_error_facts()),
+            ErrorDetails::InputValidation { source }
+            | ErrorDetails::OutputValidation { source }
+            | ErrorDetails::StreamError { source, .. } => {
+                source.get_details().lp_provider_error_facts()
+            }
+            ErrorDetails::InferenceClient {
+                provider_type,
+                api_type,
+                ..
+            }
+            | ErrorDetails::InferenceServer {
+                provider_type,
+                api_type,
+                ..
+            } => Some(LpProviderErrorFacts {
+                provider_type: Some(provider_type.as_str()),
+                api_type: Some(*api_type),
+                stream_phase: "pre_stream",
+            }),
+            ErrorDetails::FatalStreamError {
+                provider_type,
+                api_type,
+                ..
+            } => Some(LpProviderErrorFacts {
+                provider_type: Some(provider_type.as_str()),
+                api_type: Some(*api_type),
+                stream_phase: "mid_stream",
+            }),
+            ErrorDetails::Relay { raw_response, .. } => {
+                raw_response.last().map(|entry| LpProviderErrorFacts {
+                    provider_type: Some(entry.provider_type.as_str()),
+                    api_type: Some(entry.api_type),
+                    stream_phase: "pre_stream",
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn lp_error_source(&self) -> &'static str {
+        match self {
+            ErrorDetails::AllRetriesFailed { errors } => errors
+                .last()
+                .map(|error| error.get_details().lp_error_source())
+                .unwrap_or("tensorzero"),
+            ErrorDetails::AllVariantsFailed { errors } => errors
+                .values()
+                .last()
+                .map(|error| error.get_details().lp_error_source())
+                .unwrap_or("tensorzero"),
+            ErrorDetails::AllCandidatesFailed { candidate_errors } => candidate_errors
+                .values()
+                .last()
+                .map(|error| error.get_details().lp_error_source())
+                .unwrap_or("tensorzero"),
+            ErrorDetails::AllModelProvidersFailed { provider_errors } => provider_errors
+                .values()
+                .last()
+                .map(|error| error.get_details().lp_error_source())
+                .unwrap_or("tensorzero"),
+            ErrorDetails::InputValidation { source }
+            | ErrorDetails::OutputValidation { source }
+            | ErrorDetails::StreamError { source, .. } => source.get_details().lp_error_source(),
+            ErrorDetails::InferenceClient { .. }
+            | ErrorDetails::InferenceServer { .. }
+            | ErrorDetails::FatalStreamError { .. } => "provider",
+            ErrorDetails::Relay { .. } => "transport",
+            _ => "tensorzero",
         }
     }
 
@@ -2400,6 +2553,88 @@ mod tests {
         let raw_response = body["tensorzero_raw_response"].as_array().unwrap();
         assert_eq!(raw_response.len(), 1, "should have one entry");
         assert_eq!(raw_response[0]["provider_type"], "anthropic");
+    }
+
+    #[test]
+    fn test_build_response_body_openai_always_includes_tensorzero_error_json() {
+        let error = Error::new(ErrorDetails::InferenceClient {
+            message: "rate limited".to_string(),
+            status_code: Some(StatusCode::TOO_MANY_REQUESTS),
+            provider_type: "openai".to_string(),
+            api_type: ApiType::ChatCompletions,
+            raw_request: None,
+            raw_response: None,
+        });
+
+        let body = error.build_response_body(true, None);
+        let error_json = &body["error"]["tensorzero_error_json"];
+
+        assert!(
+            error_json.is_object(),
+            "OpenAI-compatible errors should carry TensorZero structured facts"
+        );
+        assert_eq!(error_json["schemaVersion"], "llm.error.v1");
+        assert_eq!(error_json["source"], "provider");
+        assert_eq!(error_json["tensorzero"]["errorKind"], "InferenceClient");
+        assert_eq!(
+            error_json["tensorzero"]["wrapperStatusCode"],
+            StatusCode::TOO_MANY_REQUESTS.as_u16()
+        );
+        assert_eq!(
+            error_json["tensorzero"]["underlyingStatusCode"],
+            StatusCode::TOO_MANY_REQUESTS.as_u16()
+        );
+        assert_eq!(error_json["tensorzero"]["providerType"], "openai");
+        assert_eq!(
+            error_json["tensorzero"]["apiType"],
+            json!("chat_completions")
+        );
+        assert_eq!(error_json["tensorzero"]["streamPhase"], "pre_stream");
+        assert_eq!(error_json["tensorzero"]["retryable"], true);
+        assert_eq!(
+            error_json["upstream"]["statusCode"],
+            StatusCode::TOO_MANY_REQUESTS.as_u16()
+        );
+        assert_eq!(error_json["raw"]["available"], false);
+        assert_eq!(error_json["raw"]["included"], false);
+    }
+
+    #[test]
+    fn test_build_response_body_openai_v1_envelope_preserves_underlying_status() {
+        let mut provider_errors = IndexMap::new();
+        provider_errors.insert(
+            "openai".to_string(),
+            Error::new(ErrorDetails::InferenceClient {
+                message: "unauthorized".to_string(),
+                status_code: Some(StatusCode::UNAUTHORIZED),
+                provider_type: "openai".to_string(),
+                api_type: ApiType::ChatCompletions,
+                raw_request: None,
+                raw_response: Some(r#"{"error":"unauthorized"}"#.to_string()),
+            }),
+        );
+        let error = Error::new(ErrorDetails::AllModelProvidersFailed { provider_errors });
+
+        let body = error.build_response_body(true, None);
+        let error_json = &body["error"]["tensorzero_error_json"];
+
+        assert_eq!(error_json["schemaVersion"], "llm.error.v1");
+        assert_eq!(
+            error_json["tensorzero"]["errorKind"],
+            "AllModelProvidersFailed"
+        );
+        assert_eq!(
+            error_json["tensorzero"]["wrapperStatusCode"],
+            StatusCode::INTERNAL_SERVER_ERROR.as_u16()
+        );
+        assert_eq!(
+            error_json["tensorzero"]["underlyingStatusCode"],
+            StatusCode::UNAUTHORIZED.as_u16()
+        );
+        assert_eq!(error_json["tensorzero"]["providerType"], "openai");
+        assert_eq!(error_json["tensorzero"]["streamPhase"], "pre_stream");
+        assert_eq!(error_json["raw"]["available"], true);
+        assert_eq!(error_json["raw"]["included"], false);
     }
 
     #[test]

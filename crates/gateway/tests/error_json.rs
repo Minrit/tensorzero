@@ -5,6 +5,22 @@ use crate::common::start_gateway_on_random_port;
 
 mod common;
 
+fn assert_v1_tensorzero_error_envelope(value: &Value) {
+    assert!(
+        value.is_object(),
+        "`tensorzero_error_json` should be an object"
+    );
+    assert_eq!(value["schemaVersion"], "llm.error.v1");
+    assert!(
+        value.get("tensorzero").is_some(),
+        "`tensorzero_error_json` should include TensorZero facts"
+    );
+    assert!(
+        value.get("raw").is_some(),
+        "`tensorzero_error_json` should include raw availability facts"
+    );
+}
+
 #[tokio::test]
 async fn test_no_error_json() {
     let child_data = start_gateway_on_random_port("", None).await;
@@ -88,6 +104,11 @@ async fn test_openai_compatible_error_format() {
         error_obj.get("message").unwrap().is_string(),
         "The `message` field should be a string"
     );
+    assert!(
+        error_obj.get("tensorzero_error_json").is_some(),
+        "OpenAI-compatible errors should always include TensorZero structured error facts"
+    );
+    assert_v1_tensorzero_error_envelope(&error_obj["tensorzero_error_json"]);
 }
 
 /// Test that OpenAI-compatible embeddings endpoint returns errors in OpenAI format
@@ -123,6 +144,11 @@ async fn test_openai_compatible_embeddings_error_format() {
         error_obj.get("message").unwrap().is_string(),
         "The `message` field should be a string"
     );
+    assert!(
+        error_obj.get("tensorzero_error_json").is_some(),
+        "OpenAI-compatible errors should always include TensorZero structured error facts"
+    );
+    assert_v1_tensorzero_error_envelope(&error_obj["tensorzero_error_json"]);
 }
 
 /// Test that OpenAI-compatible endpoint includes `error_json` when `UNSTABLE_ERROR_JSON` is enabled
@@ -172,11 +198,11 @@ async fn test_openai_compatible_error_json() {
         error_obj.get("tensorzero_error_json").unwrap().is_object(),
         "The `tensorzero_error_json` field should be an object"
     );
-    // Both fields should have identical content
-    assert_eq!(
+    assert_v1_tensorzero_error_envelope(&error_obj["tensorzero_error_json"]);
+    assert_ne!(
         error_obj.get("error_json"),
         error_obj.get("tensorzero_error_json"),
-        "`error_json` and `tensorzero_error_json` should be identical"
+        "`error_json` remains the legacy alias while `tensorzero_error_json` uses the stable v1 envelope"
     );
 }
 
@@ -269,6 +295,11 @@ async fn test_auth_error_openai_format() {
             .contains("TensorZero authentication error"),
         "Error message should mention authentication"
     );
+    assert!(
+        error_obj.get("tensorzero_error_json").is_some(),
+        "OpenAI-compatible auth errors should always include TensorZero structured error facts"
+    );
+    assert_v1_tensorzero_error_envelope(&error_obj["tensorzero_error_json"]);
 }
 
 /// Test that auth errors on OpenAI endpoints use OpenAI format with a base path
