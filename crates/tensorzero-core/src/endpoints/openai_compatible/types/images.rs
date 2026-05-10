@@ -74,6 +74,41 @@ impl OpenAICompatibleImageGenerationParams {
             })
     }
 
+    pub fn provider_type(&self) -> String {
+        self.tensorzero_credentials
+            .get("provider_type")
+            .map(|value| value.expose_secret().trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                self.extra
+                    .get("tensorzero::provider_type")
+                    .and_then(Value::as_str)
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| "openai".to_string())
+    }
+
+    pub fn image_provider_family(&self) -> Option<String> {
+        self.tensorzero_credentials
+            .get("image_provider_family")
+            .or_else(|| self.tensorzero_credentials.get("imageProviderFamily"))
+            .map(|value| value.expose_secret().trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn image_generation_url(&self) -> Option<&SecretString> {
+        self.tensorzero_credentials
+            .get("image_generation_url")
+            .or_else(|| self.tensorzero_credentials.get("imageGenerationUrl"))
+    }
+
+    pub fn image_task_url_template(&self) -> Option<&SecretString> {
+        self.tensorzero_credentials
+            .get("image_task_url_template")
+            .or_else(|| self.tensorzero_credentials.get("imageTaskUrlTemplate"))
+    }
+
     pub fn provider_api_key(&self) -> Result<&SecretString, Error> {
         self.tensorzero_credentials
             .get("openai_api_key")
@@ -181,6 +216,34 @@ mod tests {
         assert_eq!(
             params.provider_api_base().unwrap().expose_secret(),
             "https://example.com/v1"
+        );
+    }
+
+    #[test]
+    fn reads_provider_hint_and_injected_image_urls() {
+        let params: OpenAICompatibleImageGenerationParams =
+            serde_json::from_value(serde_json::json!({
+                "model": "image-model",
+                "prompt": "test",
+                "tensorzero::credentials": {
+                    "openai_api_key": "secret",
+                    "provider_type": "qwen",
+                    "image_provider_family": "dashscope",
+                    "image_generation_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis",
+                    "image_task_url_template": "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+                }
+            }))
+            .unwrap();
+
+        assert_eq!(params.provider_type(), "qwen");
+        assert_eq!(params.image_provider_family().as_deref(), Some("dashscope"));
+        assert_eq!(
+            params.image_generation_url().unwrap().expose_secret(),
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+        );
+        assert_eq!(
+            params.image_task_url_template().unwrap().expose_secret(),
+            "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
         );
     }
 
