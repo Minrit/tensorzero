@@ -53,7 +53,7 @@ RUN if [ "${PROFILE}" = "dev" ]; then cp -r /tensorzero/crates/target/debug /rel
 
 FROM debian:trixie-slim AS base
 
-RUN apt-get update && apt-get install -y ca-certificates openssl wget && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates openssl wget curl && rm -rf /var/lib/apt/lists/*
 
 # ========== gateway ==========
 
