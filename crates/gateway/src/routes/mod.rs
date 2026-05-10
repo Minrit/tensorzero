@@ -1,6 +1,8 @@
 //! Route definitions and endpoint mappings for the TensorZero Gateway API.
 
+#[cfg(feature = "full-gateway")]
 mod action;
+#[cfg(feature = "full-gateway")]
 pub mod evaluations;
 mod external;
 mod internal;

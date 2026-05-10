@@ -2,7 +2,7 @@
 #
 # Build the binary first with scripts/build-gateway-prebuilt.sh, then package:
 #
-#   scripts/build-gateway-prebuilt.sh linux-arm64
+#   PROFILE=dev scripts/build-gateway-prebuilt.sh linux-arm64
 #   docker buildx build --platform linux/arm64 \
 #     -f crates/gateway/Dockerfile.prebuilt \
 #     --build-arg GIT_COMMIT="$(git rev-parse --short HEAD)" \
@@ -12,6 +12,10 @@
 # The expected binary path is selected from TARGETARCH:
 #   linux/arm64 -> dist/gateway-linux-arm64
 #   linux/amd64 -> dist/gateway-linux-amd64
+#
+# The helper script builds the LP slim gateway by default. For an
+# upstream-compatible diagnostic binary, run it with:
+#   GATEWAY_NO_DEFAULT_FEATURES=1 GATEWAY_FEATURES=full-gateway
 
 FROM debian:trixie-slim AS base
 

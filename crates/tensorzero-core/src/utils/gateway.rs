@@ -49,8 +49,14 @@ use crate::error::{DelayedError, Error, ErrorDetails};
 use crate::howdy::{get_deployment_id, setup_howdy};
 use crate::http::TensorzeroHttpClient;
 use crate::rate_limiting::{RateLimitingConfig, RateLimitingManager};
+#[cfg(feature = "full-gateway")]
 use autopilot_client::AutopilotClient;
+#[cfg(not(feature = "full-gateway"))]
+type AutopilotClient = ();
+#[cfg(feature = "full-gateway")]
 use durable_tools_spawn::SpawnClient;
+#[cfg(not(feature = "full-gateway"))]
+type SpawnClient = ();
 
 #[cfg(test)]
 use crate::db::clickhouse::ClickHouseClient;
@@ -766,6 +772,7 @@ impl GatewayHandle {
             }));
         }
 
+        #[cfg(feature = "full-gateway")]
         let spawn_client = if let Some(pool) = postgres_connection_info.get_pool() {
             let queue_name = std::env::var("TENSORZERO_AUTOPILOT_QUEUE_NAME")
                 .unwrap_or_else(|_| "autopilot".to_string());
@@ -784,7 +791,10 @@ impl GatewayHandle {
         } else {
             None
         };
+        #[cfg(not(feature = "full-gateway"))]
+        let spawn_client = None;
 
+        #[cfg(feature = "full-gateway")]
         let autopilot_client = setup_autopilot_client(
             &postgres_connection_info,
             deployment_id.as_ref(),
@@ -792,6 +802,8 @@ impl GatewayHandle {
             tool_whitelist,
         )
         .await?;
+        #[cfg(not(feature = "full-gateway"))]
+        let autopilot_client = None;
 
         if config.gateway.auth.enabled
             && matches!(postgres_connection_info, PostgresConnectionInfo::Disabled)
@@ -1238,6 +1250,7 @@ pub async fn setup_valkey_cache(
 /// - `TENSORZERO_AUTOPILOT_API_KEY`: Required to enable the client
 /// - `TENSORZERO_AUTOPILOT_BASE_URL`: Optional custom base URL (for testing)
 /// - `TENSORZERO_AUTOPILOT_QUEUE_NAME`: Optional queue name for tool dispatching
+#[cfg(feature = "full-gateway")]
 async fn setup_autopilot_client(
     postgres_connection_info: &PostgresConnectionInfo,
     deployment_id: Option<&String>,

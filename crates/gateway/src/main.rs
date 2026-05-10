@@ -18,7 +18,9 @@ use tokio::signal;
 use tokio_stream::wrappers::IntervalStream;
 use tracing::Level;
 
+#[cfg(feature = "full-gateway")]
 use autopilot_worker::{AutopilotWorkerConfig, AutopilotWorkerHandle, spawn_autopilot_worker};
+#[cfg(feature = "full-gateway")]
 use durable_tools::{EmbeddedClient, WorkerOptions};
 use tensorzero_auth::constants::{DEFAULT_ORGANIZATION, DEFAULT_WORKSPACE};
 use tensorzero_core::config::{Config, ConfigFileGlob, unwritten::UnwrittenConfig};
@@ -283,6 +285,12 @@ async fn handle_create_api_key(
     Ok(())
 }
 
+#[cfg(not(feature = "full-gateway"))]
+async fn run_optimization_postgres_migrations() -> Result<(), Error> {
+    Ok(())
+}
+
+#[cfg(feature = "full-gateway")]
 async fn run_optimization_postgres_migrations() -> Result<(), Error> {
     let postgres_url = std::env::var("TENSORZERO_POSTGRES_URL").map_err(|_| {
         Error::new(ErrorDetails::PostgresConnectionInitialization {
@@ -557,17 +565,24 @@ async fn run() -> Result<(), ExitCode> {
         );
     }
 
-    // Collect available tool names for autopilot (single source of truth)
-    let available_tools = autopilot_tools::collect_tool_names()
-        .await
-        .log_err_pretty("Failed to collect autopilot tool names")?;
+    #[cfg(feature = "full-gateway")]
+    let (available_tools, tool_whitelist) = {
+        // Collect available tool names for autopilot (single source of truth)
+        let available_tools = autopilot_tools::collect_tool_names()
+            .await
+            .log_err_pretty("Failed to collect autopilot tool names")?;
 
-    // Resolve tool whitelist from config
-    let tool_whitelist: std::collections::HashSet<String> =
-        match &unwritten_config.autopilot.tool_whitelist {
-            Some(list) => list.iter().cloned().collect(),
-            None => autopilot_tools::default_whitelisted_tool_names(),
-        };
+        // Resolve tool whitelist from config
+        let tool_whitelist: std::collections::HashSet<String> =
+            match &unwritten_config.autopilot.tool_whitelist {
+                Some(list) => list.iter().cloned().collect(),
+                None => autopilot_tools::default_whitelisted_tool_names(),
+            };
+        (available_tools, tool_whitelist)
+    };
+
+    #[cfg(not(feature = "full-gateway"))]
+    let (available_tools, tool_whitelist) = (Default::default(), Default::default());
 
     // Initialize GatewayHandle
     let gateway_handle = gateway::GatewayHandle::new(
@@ -584,17 +599,24 @@ async fn run() -> Result<(), ExitCode> {
 
     validate_postgres_extensions_for_postgres_primary(&gateway_handle).await?;
 
-    // Start autopilot worker if configured
-    let autopilot_worker_handle = spawn_autopilot_worker_if_configured(&gateway_handle).await?;
+    #[cfg(feature = "full-gateway")]
+    let autopilot_worker_enabled = {
+        // Start autopilot worker if configured
+        let autopilot_worker_handle = spawn_autopilot_worker_if_configured(&gateway_handle).await?;
 
-    // Start tool whitelist approver if configured
-    if let Some(client) = gateway_handle.app_state.autopilot_client.clone() {
-        let token = gateway_handle.app_state.shutdown_token.clone();
-        gateway_handle
-            .app_state
-            .deferred_tasks
-            .spawn(async move { client.run_tool_whitelist_approver(token).await });
-    }
+        // Start tool whitelist approver if configured
+        if let Some(client) = gateway_handle.app_state.autopilot_client.clone() {
+            let token = gateway_handle.app_state.shutdown_token.clone();
+            gateway_handle
+                .app_state
+                .deferred_tasks
+                .spawn(async move { client.run_tool_whitelist_approver(token).await });
+        }
+
+        autopilot_worker_handle.is_some()
+    };
+    #[cfg(not(feature = "full-gateway"))]
+    let autopilot_worker_enabled = false;
 
     // Create a new observability_enabled_pretty string for the log message below
     let postgres_enabled_pretty =
@@ -737,13 +759,14 @@ async fn run() -> Result<(), ExitCode> {
     }
 
     // Print whether Autopilot Worker is enabled
-    if autopilot_worker_handle.is_some() {
+    if autopilot_worker_enabled {
         tracing::info!("├ Autopilot Worker: enabled");
     } else {
         tracing::info!("├ Autopilot Worker: disabled");
     }
 
     // Print whether Autopilot Tool Whitelist Approver is enabled
+    #[cfg(feature = "full-gateway")]
     if let Some(client) = gateway_handle.app_state.autopilot_client.as_ref() {
         let count = client.tool_whitelist.len();
         if count > 0 {
@@ -754,6 +777,8 @@ async fn run() -> Result<(), ExitCode> {
     } else {
         tracing::info!("├ Autopilot Tool Whitelist Approver: disabled");
     }
+    #[cfg(not(feature = "full-gateway"))]
+    tracing::info!("├ Autopilot Tool Whitelist Approver: disabled");
 
     // Print whether OpenTelemetry is enabled
     let otlp_traces_enabled = config
@@ -931,6 +956,7 @@ pub async fn shutdown_signal() {
 /// The worker processes tasks from the durable queue. It starts whenever Postgres
 /// is available, regardless of whether the autopilot API key is set. This allows
 /// standalone durable tools (e.g. GEPA) to run without autopilot credentials.
+#[cfg(feature = "full-gateway")]
 async fn spawn_autopilot_worker_if_configured(
     gateway_handle: &gateway::GatewayHandle,
 ) -> Result<Option<AutopilotWorkerHandle>, ExitCode> {

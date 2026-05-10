@@ -7,8 +7,8 @@ license.workspace = true
 
 [dependencies]
 tensorzero-core = { path = "../tensorzero-core" }
-tensorzero-optimizers = { path = "../tensorzero-optimizers" }
-evaluations = { path = "../evaluations" }
+tensorzero-optimizers = { path = "../tensorzero-optimizers", optional = true }
+evaluations = { path = "../evaluations", optional = true }
 axum = { workspace = true }
 tracing = { version = "0.1.43", features = ["log", "release_max_level_debug"] }
 tokio = { workspace = true }
@@ -21,11 +21,11 @@ http = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true }
 tensorzero-auth = { path = "../tensorzero-auth" }
-autopilot-client = { path = "../autopilot-client" }
-autopilot-worker = { path = "../autopilot-worker" }
-autopilot-tools = { path = "../autopilot-tools" }
-durable-tools = { path = "../durable-tools" }
-tensorzero-mcp = { path = "../tensorzero-mcp" }
+autopilot-client = { path = "../autopilot-client", optional = true }
+autopilot-worker = { path = "../autopilot-worker", optional = true }
+autopilot-tools = { path = "../autopilot-tools", optional = true }
+durable-tools = { path = "../durable-tools", optional = true }
+tensorzero-mcp = { path = "../tensorzero-mcp", optional = true }
 sqlx = { version = "0.9.0-alpha.1", features = ["sqlx-toml", "postgres", "runtime-tokio", "chrono"] }
 secrecy = { workspace = true }
 serde = { workspace = true }
@@ -39,8 +39,25 @@ http-body-util = { workspace = true }
 workspace = true
 
 [features]
-e2e_tests = ["tensorzero-core/e2e_tests", "autopilot-worker/e2e_tests", "autopilot-tools/e2e_tests", "tensorzero-mcp/e2e_tests"]
-default = []
+default = ["lp-slim-gateway"]
+lp-slim-gateway = []
+full-gateway = [
+  "dep:autopilot-client",
+  "dep:autopilot-tools",
+  "dep:autopilot-worker",
+  "dep:durable-tools",
+  "dep:evaluations",
+  "dep:tensorzero-mcp",
+  "dep:tensorzero-optimizers",
+  "tensorzero-core/full-gateway",
+]
+e2e_tests = [
+  "full-gateway",
+  "tensorzero-core/e2e_tests",
+  "autopilot-worker/e2e_tests",
+  "autopilot-tools/e2e_tests",
+  "tensorzero-mcp/e2e_tests",
+]
 
 [dev-dependencies]
 googletest = { workspace = true }

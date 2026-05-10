@@ -1,3 +1,4 @@
+#[cfg(feature = "full-gateway")]
 pub mod autopilot;
 pub mod config;
 pub mod config_toml;

@@ -3,11 +3,12 @@
 //! These routes are for internal use. They are unstable and might change without notice,
 //! and do not export any OpenTelemetry spans.
 
-use axum::{
-    Router,
-    routing::{get, post},
-};
+use axum::Router;
+#[cfg(feature = "full-gateway")]
+use axum::routing::{get, post};
+#[cfg(feature = "full-gateway")]
 use tensorzero_core::endpoints;
+#[cfg(feature = "full-gateway")]
 use tensorzero_core::feature_flags;
 #[expect(
     clippy::disallowed_types,
@@ -19,6 +20,16 @@ use tensorzero_core::utils::gateway::SwappableAppStateData;
     clippy::disallowed_types,
     reason = "router builders are parameterized on SwappableAppStateData by axum's type system"
 )]
+#[cfg(not(feature = "full-gateway"))]
+pub fn build_internal_non_otel_enabled_routes() -> Router<SwappableAppStateData> {
+    Router::new()
+}
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "router builders are parameterized on SwappableAppStateData by axum's type system"
+)]
+#[cfg(feature = "full-gateway")]
 pub fn build_internal_non_otel_enabled_routes() -> Router<SwappableAppStateData> {
     let router = Router::new()
         .route(

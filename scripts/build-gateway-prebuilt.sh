@@ -9,6 +9,10 @@
 #   scripts/build-gateway-prebuilt.sh binaries
 #   scripts/build-gateway-prebuilt.sh image-arm64 --tag lobsterpool/tensorzero-gateway:dynamic-api-base
 #   scripts/build-gateway-prebuilt.sh image-amd64 --tag registry.example/lobsterpool/tensorzero-gateway:staging --push
+#
+# Defaults build the LP slim gateway in the fast dev profile. Use
+# GATEWAY_NO_DEFAULT_FEATURES=1 GATEWAY_FEATURES=full-gateway for the full
+# upstream-compatible gateway.
 
 set -euo pipefail
 
@@ -16,7 +20,9 @@ cd "$(dirname "$0")/.."
 
 DIST_DIR="${DIST_DIR:-dist}"
 GLIBC_VERSION="${GLIBC_VERSION:-2.36}"
-PROFILE="${PROFILE:-performance}"
+PROFILE="${PROFILE:-dev}"
+GATEWAY_FEATURES="${GATEWAY_FEATURES:-}"
+GATEWAY_NO_DEFAULT_FEATURES="${GATEWAY_NO_DEFAULT_FEATURES:-0}"
 DEFAULT_LOCAL_TAG="${DEFAULT_LOCAL_TAG:-lobsterpool/tensorzero-gateway:dynamic-api-base}"
 DEFAULT_AMD64_TAG="${DEFAULT_AMD64_TAG:-lobsterpool/tensorzero-gateway:dynamic-api-base-amd64}"
 
@@ -48,6 +54,8 @@ Commands:
 
 Environment:
   PROFILE=${PROFILE}
+  GATEWAY_FEATURES=${GATEWAY_FEATURES:-<default lp-slim-gateway>}
+  GATEWAY_NO_DEFAULT_FEATURES=${GATEWAY_NO_DEFAULT_FEATURES}
   GLIBC_VERSION=${GLIBC_VERSION}
   DIST_DIR=${DIST_DIR}
 EOF
@@ -80,6 +88,16 @@ profile_dir() {
 
 git_commit() {
     git rev-parse --short HEAD 2>/dev/null || printf 'unknown'
+}
+
+cargo_gateway_feature_args() {
+    CARGO_GATEWAY_FEATURE_ARGS=()
+    if [ "${GATEWAY_NO_DEFAULT_FEATURES}" = "1" ]; then
+        CARGO_GATEWAY_FEATURE_ARGS+=(--no-default-features)
+    fi
+    if [ -n "${GATEWAY_FEATURES}" ]; then
+        CARGO_GATEWAY_FEATURE_ARGS+=(--features "${GATEWAY_FEATURES}")
+    fi
 }
 
 setup() {
@@ -122,9 +140,10 @@ ensure_zig_prereqs() {
 build_mac() {
     ensure_cargo_prereqs
     log "Building native macOS arm64 TensorZero gateway"
+    cargo_gateway_feature_args
     (
         cd crates
-        SKIP_TSC_VALIDATION=1 cargo build --profile "${PROFILE}" -p gateway
+        SKIP_TSC_VALIDATION=1 cargo build --profile "${PROFILE}" -p gateway "${CARGO_GATEWAY_FEATURE_ARGS[@]}"
     )
     mkdir -p "${DIST_DIR}"
     cp "crates/target/$(profile_dir)/gateway" "${DIST_DIR}/gateway-darwin-arm64"
@@ -143,9 +162,10 @@ build_linux() {
 
     ensure_zig_prereqs
     log "Building Linux ${arch} TensorZero gateway (${target})"
+    cargo_gateway_feature_args
     (
         cd crates
-        SKIP_TSC_VALIDATION=1 cargo zigbuild --profile "${PROFILE}" -p gateway --target "${target}"
+        SKIP_TSC_VALIDATION=1 cargo zigbuild --profile "${PROFILE}" -p gateway --target "${target}" "${CARGO_GATEWAY_FEATURE_ARGS[@]}"
     )
 
     target_base="$(base_target "${target}")"

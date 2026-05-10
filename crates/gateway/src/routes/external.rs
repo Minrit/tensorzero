@@ -9,9 +9,11 @@
     reason = "router builders are parameterized on SwappableAppStateData by axum's type system"
 )]
 
+#[cfg(feature = "full-gateway")]
+use axum::routing::{delete, patch};
 use axum::{
     Router,
-    routing::{delete, get, patch, post},
+    routing::{get, post},
 };
 use metrics_exporter_prometheus::PrometheusHandle;
 use tensorzero_core::endpoints::openai_compatible::build_openai_compatible_routes;
@@ -22,7 +24,9 @@ use tensorzero_core::{endpoints, utils::gateway::SwappableAppStateData};
 /// All of these routes will have a span named `METHOD <ROUTE>` (e.g. `POST /batch_inference/{batch_id}`)
 /// sent to OpenTelemetry
 pub fn build_otel_enabled_routes() -> (OtelEnabledRoutes, Router<SwappableAppStateData>) {
-    let mut routes = vec![
+    let mut routes = Vec::new();
+    #[cfg(feature = "full-gateway")]
+    routes.extend([
         ("/inference", post(endpoints::inference::inference_handler)),
         (
             "/batch_inference",
@@ -37,7 +41,9 @@ pub fn build_otel_enabled_routes() -> (OtelEnabledRoutes, Router<SwappableAppSta
             get(endpoints::batch_inference::poll_batch_inference_handler),
         ),
         ("/feedback", post(endpoints::feedback::feedback_handler)),
-    ];
+    ]);
+    #[cfg(not(feature = "full-gateway"))]
+    routes.push(("/feedback", post(endpoints::feedback::feedback_handler)));
     routes.extend(build_openai_compatible_routes().routes);
     let mut router = Router::new();
     let mut route_names = Vec::with_capacity(routes.len());
@@ -57,6 +63,12 @@ pub fn build_otel_enabled_routes() -> (OtelEnabledRoutes, Router<SwappableAppSta
 pub fn build_non_otel_enabled_routes(
     metrics_handle: PrometheusHandle,
 ) -> Router<SwappableAppStateData> {
+    #[cfg(not(feature = "full-gateway"))]
+    {
+        return build_meta_observability_routes(metrics_handle);
+    }
+
+    #[cfg(feature = "full-gateway")]
     Router::new()
         .merge(build_observability_routes())
         .merge(build_datasets_routes())
@@ -69,6 +81,7 @@ pub fn build_non_otel_enabled_routes(
 /// This function builds the public routes for observability.
 ///
 /// IMPORTANT: Add internal routes to `internal.rs` instead.
+#[cfg(feature = "full-gateway")]
 fn build_observability_routes() -> Router<SwappableAppStateData> {
     Router::new()
         .route(
@@ -84,6 +97,7 @@ fn build_observability_routes() -> Router<SwappableAppStateData> {
 /// This function builds the public routes for datasets.
 ///
 /// IMPORTANT: Add internal routes to `internal.rs` instead.
+#[cfg(feature = "full-gateway")]
 fn build_datasets_routes() -> Router<SwappableAppStateData> {
     Router::new()
         .route(
@@ -122,6 +136,7 @@ fn build_datasets_routes() -> Router<SwappableAppStateData> {
 /// This function builds the public routes for optimization.
 ///
 /// IMPORTANT: Add internal routes to `internal.rs` instead.
+#[cfg(feature = "full-gateway")]
 fn build_optimization_routes() -> Router<SwappableAppStateData> {
     Router::new()
         .route(
@@ -137,6 +152,7 @@ fn build_optimization_routes() -> Router<SwappableAppStateData> {
 /// This function builds the public routes for GEPA optimization.
 ///
 /// IMPORTANT: Add internal routes to `internal.rs` instead.
+#[cfg(feature = "full-gateway")]
 fn build_gepa_routes() -> Router<SwappableAppStateData> {
     Router::new()
         .route(
@@ -152,6 +168,7 @@ fn build_gepa_routes() -> Router<SwappableAppStateData> {
 /// This function builds the public routes for evaluations.
 ///
 /// IMPORTANT: Add internal routes to `internal.rs` instead.
+#[cfg(feature = "full-gateway")]
 fn build_evaluations_routes() -> Router<SwappableAppStateData> {
     Router::new()
         // Workflow evaluation endpoints (new)
@@ -178,4 +195,31 @@ fn build_meta_observability_routes(
         )
         .route("/status", get(endpoints::status::status_handler))
         .route("/health", get(endpoints::status::health_handler))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_otel_enabled_routes;
+
+    #[cfg(not(feature = "full-gateway"))]
+    #[test]
+    fn slim_gateway_keeps_only_lp_otel_routes() {
+        let (routes, _) = build_otel_enabled_routes();
+
+        assert!(routes.routes.contains(&"/feedback"));
+        assert!(routes.routes.contains(&"/openai/v1/chat/completions"));
+        assert!(routes.routes.contains(&"/openai/v1/embeddings"));
+        assert!(routes.routes.contains(&"/openai/v1/images/generations"));
+        assert!(!routes.routes.contains(&"/inference"));
+        assert!(!routes.routes.contains(&"/batch_inference"));
+    }
+
+    #[cfg(feature = "full-gateway")]
+    #[test]
+    fn full_gateway_keeps_native_tensorzero_otel_routes() {
+        let (routes, _) = build_otel_enabled_routes();
+
+        assert!(routes.routes.contains(&"/inference"));
+        assert!(routes.routes.contains(&"/batch_inference"));
+    }
 }
