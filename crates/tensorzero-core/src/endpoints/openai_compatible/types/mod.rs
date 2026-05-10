@@ -6,6 +6,7 @@
 
 pub mod chat_completions;
 pub mod embeddings;
+pub mod images;
 pub mod input_files;
 pub mod streaming;
 pub mod tool;

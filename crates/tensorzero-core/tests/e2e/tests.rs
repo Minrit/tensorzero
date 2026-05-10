@@ -33,6 +33,7 @@ mod mcp;
 mod mixture_of_n;
 mod object_storage;
 mod openai_compatible;
+mod openai_compatible_images;
 mod otel;
 mod otel_config_headers;
 mod otel_export;

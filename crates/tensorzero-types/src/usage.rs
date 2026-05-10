@@ -14,6 +14,7 @@ pub enum ApiType {
     ChatCompletions,
     Responses,
     Embeddings,
+    Images,
     Other,
 }
 

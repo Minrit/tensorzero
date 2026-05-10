@@ -1,18 +1,20 @@
 //! OpenAI-compatible API endpoints.
 //!
 //! This module provides compatibility with OpenAI's API format, supporting both
-//! chat completions and embeddings endpoints. It handles routing, request/response
+//! chat completions, embeddings, and image generation endpoints. It handles routing, request/response
 //! conversion, and provides the main entry points for OpenAI-compatible requests.
 
 pub mod chat_completions;
 pub mod embeddings;
 pub mod error;
+pub mod images;
 pub mod types;
 
 pub use error::{OpenAICompatibleError, OpenAIStructuredJson};
 
 use chat_completions::chat_completions_handler;
 use embeddings::embeddings_handler;
+use images::image_generations_handler;
 
 use axum::Router;
 use axum::routing::post;
@@ -38,6 +40,10 @@ pub fn build_openai_compatible_routes() -> RouteHandlers {
                 post(chat_completions_handler),
             ),
             ("/openai/v1/embeddings", post(embeddings_handler)),
+            (
+                "/openai/v1/images/generations",
+                post(image_generations_handler),
+            ),
         ],
     }
 }
