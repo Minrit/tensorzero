@@ -8,6 +8,7 @@ pub mod aws_sagemaker;
 pub mod azure;
 pub mod chat_completions;
 pub mod deepseek;
+pub mod deepseek_dsml;
 #[cfg(any(test, feature = "e2e_tests"))]
 pub mod dummy;
 pub mod fireworks;

@@ -22,7 +22,7 @@ use crate::inference::types::chat_completion_inference_params::{
 };
 use crate::inference::types::usage::raw_usage_entries_from_value;
 use crate::inference::types::{
-    ApiType, ContentBlockChunk, ContentBlockOutput, Latency, ModelInferenceRequest,
+    ApiType, ContentBlockChunk, ContentBlockOutput, FinishReason, Latency, ModelInferenceRequest,
     ModelInferenceRequestJsonMode, PeekableProviderInferenceResponseStream,
     ProviderInferenceResponse, ProviderInferenceResponseArgs, ProviderInferenceResponseChunk,
     ProviderInferenceResponseStreamInner, TextChunk, Thought, ThoughtChunk, Usage,
@@ -32,6 +32,7 @@ use crate::model::Credential;
 use crate::model::{ModelProviderRequestInfo, ProviderInferenceRequest};
 use crate::providers::chat_completions::prepare_chat_completion_tools;
 use crate::providers::chat_completions::{ChatCompletionTool, ChatCompletionToolChoice};
+use crate::providers::deepseek_dsml::{DsmlDiagnostic, DsmlStreamState};
 use crate::providers::openai::{
     OpenAIAssistantRequestMessage, OpenAIContentBlock, OpenAIRequestMessage,
     OpenAISystemRequestMessage, OpenAIUserRequestMessage, StreamOptions, SystemOrDeveloper,
@@ -485,6 +486,7 @@ fn stream_deepseek(
 ) -> ProviderInferenceResponseStreamInner {
     let raw_request = raw_request.to_string();
     let mut tool_call_ids = Vec::new();
+    let mut dsml_state = DsmlStreamState::default();
     Box::pin(async_stream::stream! {
         while let Some(ev) = event_source.next().await {
             match ev {
@@ -495,6 +497,32 @@ fn stream_deepseek(
                     Event::Open => continue,
                     Event::Message(message) => {
                         if message.data == "[DONE]" {
+                            let final_consumed = dsml_state.consume("", true, model_inference_id);
+                            log_dsml_diagnostics(&final_consumed.diagnostics);
+                            if !final_consumed.text_passthrough.is_empty()
+                                || !final_consumed.tool_calls.is_empty()
+                            {
+                                let mut content = Vec::new();
+                                if !final_consumed.text_passthrough.is_empty() {
+                                    content.push(ContentBlockChunk::Text(TextChunk {
+                                        text: final_consumed.text_passthrough,
+                                        id: "0".to_string(),
+                                    }));
+                                }
+                                content.extend(
+                                    final_consumed
+                                        .tool_calls
+                                        .into_iter()
+                                        .map(ContentBlockChunk::ToolCall),
+                                );
+                                yield Ok(ProviderInferenceResponseChunk::new(
+                                    content,
+                                    None,
+                                    message.data,
+                                    start_time.elapsed(),
+                                    final_consumed.finish_override,
+                                ));
+                            }
                             break;
                         }
                         let data: Result<DeepSeekChatChunk, Error> =
@@ -515,6 +543,7 @@ fn stream_deepseek(
                                 d,
                                 latency,
                                 &mut tool_call_ids,
+                                &mut dsml_state,
                                 model_inference_id,
                             )
                         });
@@ -532,6 +561,7 @@ fn deepseek_to_tensorzero_chunk(
     mut chunk: DeepSeekChatChunk,
     latency: Duration,
     tool_call_ids: &mut Vec<String>,
+    dsml_state: &mut DsmlStreamState,
     model_inference_id: Uuid,
 ) -> Result<ProviderInferenceResponseChunk, Error> {
     if chunk.choices.len() > 1 {
@@ -560,10 +590,20 @@ fn deepseek_to_tensorzero_chunk(
             finish_reason = Some(choice_finish_reason.into());
         }
         if let Some(text) = choice.delta.content {
-            content.push(ContentBlockChunk::Text(TextChunk {
-                text,
-                id: "0".to_string(),
-            }));
+            let dsml_consumed = dsml_state.consume(&text, false, model_inference_id);
+            log_dsml_diagnostics(&dsml_consumed.diagnostics);
+            if !dsml_consumed.text_passthrough.is_empty() {
+                content.push(ContentBlockChunk::Text(TextChunk {
+                    text: dsml_consumed.text_passthrough,
+                    id: "0".to_string(),
+                }));
+            }
+            content.extend(
+                dsml_consumed
+                    .tool_calls
+                    .into_iter()
+                    .map(ContentBlockChunk::ToolCall),
+            );
         }
         if let Some(reasoning) = choice.delta.reasoning_content {
             content.push(ContentBlockChunk::Thought(ThoughtChunk {
@@ -606,6 +646,9 @@ fn deepseek_to_tensorzero_chunk(
             }
         }
     }
+    if finish_reason == Some(FinishReason::Stop) && dsml_state.had_successful_emission {
+        finish_reason = Some(FinishReason::ToolCall);
+    }
 
     Ok(ProviderInferenceResponseChunk::new_with_raw_usage(
         content,
@@ -615,6 +658,17 @@ fn deepseek_to_tensorzero_chunk(
         finish_reason,
         raw_usage,
     ))
+}
+
+fn log_dsml_diagnostics(diagnostics: &[DsmlDiagnostic]) {
+    for diagnostic in diagnostics {
+        tracing::warn!(
+            event = "deepseek_dsml_malformed",
+            kind = ?diagnostic.kind,
+            body_length = diagnostic.body_length,
+            "DeepSeek DSML tool-call block was dropped"
+        );
+    }
 }
 
 pub(super) async fn prepare_deepseek_messages<'a>(
@@ -844,7 +898,10 @@ mod tests {
         OpenAIRequestFunctionCall, OpenAIRequestToolCall, OpenAIToolRequestMessage, OpenAIToolType,
     };
     use crate::providers::test_helpers::{WEATHER_PROVIDER_TOOL_CONFIG, WEATHER_TOOL};
-    use tensorzero_types_providers::deepseek::{DeepSeekResponseMessage, DeepSeekUsage};
+    use tensorzero_types_providers::deepseek::{
+        DeepSeekChatChunkChoice, DeepSeekDelta, DeepSeekFunctionCallChunk, DeepSeekResponseMessage,
+        DeepSeekToolCallChunk, DeepSeekUsage,
+    };
     use tensorzero_types_providers::openai::OpenAIFinishReason;
 
     #[tokio::test]
@@ -1001,6 +1058,118 @@ mod tests {
             ErrorDetails::Config { message } if message.contains("Invalid api_key_location")
         ));
     }
+
+    #[tokio::test]
+    async fn test_deepseek_chunk_recovers_dsml_tool_call_and_overrides_finish_reason() {
+        let model_inference_id = Uuid::parse_str("018cb37e-a000-7af7-84eb-04218e011e69").unwrap();
+        let mut tool_call_ids = Vec::new();
+        let mut dsml_state = DsmlStreamState::default();
+        let dsml = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"glob\"><｜｜DSML｜｜parameter name=\"pattern\" string=\"true\">/workspace/chunjiang/**</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
+
+        let chunk = DeepSeekChatChunk {
+            choices: vec![DeepSeekChatChunkChoice {
+                delta: DeepSeekDelta {
+                    content: Some(dsml.to_string()),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let first = deepseek_to_tensorzero_chunk(
+            "raw-1".to_string(),
+            chunk,
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut dsml_state,
+            model_inference_id,
+        )
+        .unwrap();
+
+        assert_eq!(first.content.len(), 1);
+        match &first.content[0] {
+            ContentBlockChunk::ToolCall(tool_call) => {
+                assert_eq!(tool_call.raw_name.as_deref(), Some("glob"));
+                assert_eq!(
+                    tool_call.raw_arguments,
+                    r#"{"pattern":"/workspace/chunjiang/**"}"#
+                );
+                assert!(tool_call.id.starts_with("dsml-"));
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+        assert_eq!(first.finish_reason, None);
+
+        let stop_chunk = DeepSeekChatChunk {
+            choices: vec![DeepSeekChatChunkChoice {
+                delta: DeepSeekDelta {
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some(OpenAIFinishReason::Stop),
+            }],
+            usage: None,
+        };
+        let final_chunk = deepseek_to_tensorzero_chunk(
+            "raw-2".to_string(),
+            stop_chunk,
+            Duration::from_millis(2),
+            &mut tool_call_ids,
+            &mut dsml_state,
+            model_inference_id,
+        )
+        .unwrap();
+        assert_eq!(final_chunk.finish_reason, Some(FinishReason::ToolCall));
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_chunk_keeps_structured_tool_call_path_unchanged() {
+        let model_inference_id = Uuid::now_v7();
+        let mut tool_call_ids = Vec::new();
+        let mut dsml_state = DsmlStreamState::default();
+        let chunk = DeepSeekChatChunk {
+            choices: vec![DeepSeekChatChunkChoice {
+                delta: DeepSeekDelta {
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Some(vec![DeepSeekToolCallChunk {
+                        index: 0,
+                        id: Some("call_123".to_string()),
+                        function: DeepSeekFunctionCallChunk {
+                            name: Some("glob".to_string()),
+                            arguments: Some(r#"{"pattern":"/workspace/**"}"#.to_string()),
+                        },
+                    }]),
+                },
+                finish_reason: Some(OpenAIFinishReason::ToolCalls),
+            }],
+            usage: None,
+        };
+
+        let parsed = deepseek_to_tensorzero_chunk(
+            "raw".to_string(),
+            chunk,
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut dsml_state,
+            model_inference_id,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.finish_reason, Some(FinishReason::ToolCall));
+        match &parsed.content[0] {
+            ContentBlockChunk::ToolCall(tool_call) => {
+                assert_eq!(tool_call.id, "call_123");
+                assert_eq!(tool_call.raw_name.as_deref(), Some("glob"));
+                assert_eq!(tool_call.raw_arguments, r#"{"pattern":"/workspace/**"}"#);
+            }
+            other => panic!("expected structured tool call, got {other:?}"),
+        }
+        assert!(!dsml_state.had_successful_emission);
+    }
+
     #[tokio::test]
     async fn test_deepseek_response_with_metadata_try_into() {
         let valid_response = DeepSeekResponse {
