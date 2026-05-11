@@ -38,10 +38,11 @@ use crate::http::TensorzeroHttpClient;
 use crate::inference::types::RequestMessage;
 use crate::inference::types::RequestMessageExt;
 use crate::inference::types::batch::{
-    BatchEpisodeIds, BatchEpisodeIdsWithSize, BatchInferenceDatabaseInsertMetadata,
-    BatchInferenceParams, BatchInferenceParamsWithSize, BatchModelInferenceRow,
-    BatchOutputSchemasWithSize, BatchRequestRow, BatchStatus, PollBatchInferenceResponse,
-    ProviderBatchInferenceOutput, ProviderBatchInferenceResponse, UnparsedBatchRequestRow,
+    BatchEpisodeIdInput, BatchEpisodeIds, BatchEpisodeIdsWithSize,
+    BatchInferenceDatabaseInsertMetadata, BatchInferenceParams, BatchInferenceParamsWithSize,
+    BatchModelInferenceRow, BatchOutputSchemas, BatchOutputSchemasWithSize, BatchRequestRow,
+    BatchStatus, PollBatchInferenceResponse, ProviderBatchInferenceOutput,
+    ProviderBatchInferenceResponse, UnparsedBatchRequestRow,
 };
 use crate::inference::types::resolved_input::LazyResolvedInput;
 use crate::inference::types::{
@@ -107,9 +108,7 @@ pub struct StartBatchInferenceParams {
     pub credentials: InferenceCredentials,
 }
 
-pub type BatchEpisodeIdInput = Vec<Option<Uuid>>;
 pub type BatchTags = Vec<Option<HashMap<String, String>>>;
-pub type BatchOutputSchemas = Vec<Option<Value>>;
 
 /// This handler starts a batch inference request for a particular function.
 /// The entire batch must use the same function and variant.

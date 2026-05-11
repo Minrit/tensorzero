@@ -44,7 +44,7 @@
 //!           ObjectStorageFile (metadata + data)
 //! ```
 
-use aws_smithy_types::base64;
+use base64::{Engine as _, engine::general_purpose};
 use mime::MediaType;
 
 use crate::{
@@ -185,7 +185,7 @@ impl FileExt for File {
                     }
                 };
 
-                let data = base64::encode(bytes);
+                let data = general_purpose::STANDARD.encode(bytes);
                 Ok(Base64File::from_parts(
                     Some(url),
                     mime_type,

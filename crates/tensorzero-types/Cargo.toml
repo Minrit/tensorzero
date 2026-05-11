@@ -8,9 +8,10 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-aws-smithy-types = { version = "1.4.7", features = ["byte-stream-poll-next"] }
+aws-smithy-types = { version = "1.4.7", features = ["byte-stream-poll-next"], optional = true }
+base64 = "0.22.1"
 chrono.workspace = true
-durable.workspace = true
+durable = { workspace = true, optional = true }
 hex = "0.4.3"
 num-bigint = "0.4"
 infer.workspace = true
@@ -33,6 +34,8 @@ blake3 = { workspace = true, optional = true }
 
 [features]
 default = []
+lp-slim-types = []
+full-types = ["dep:aws-smithy-types", "dep:durable"]
 pyo3 = ["dep:pyo3"]
 e2e_tests = ["dep:blake3"]
 

@@ -8,6 +8,7 @@ use crate::error::DelayedError;
 use axum::http;
 use futures::StreamExt;
 use futures::future::try_join_all;
+#[cfg(feature = "gcp-vertex-providers")]
 use google_cloud_auth::credentials::{CacheableResource, Credentials};
 use http::{HeaderMap, HeaderValue};
 use itertools::Itertools;
@@ -234,6 +235,7 @@ pub async fn make_gcp_object_store(
                     bearer: key.expose_secret().to_string(),
                 })));
         }
+        #[cfg(feature = "gcp-vertex-providers")]
         GCPVertexCredentials::Sdk(creds) => {
             let headers = creds
                 .headers(http::Extensions::default())
@@ -707,6 +709,7 @@ pub enum GCPVertexCredentials {
         raw: SecretString,
     },
     Dynamic(String),
+    #[cfg(feature = "gcp-vertex-providers")]
     Sdk(Credentials),
     None,
     WithFallback {
@@ -887,6 +890,7 @@ impl GCPVertexCredentials {
                     })?
                     .expose_secret(),
             ),
+            #[cfg(feature = "gcp-vertex-providers")]
             GCPVertexCredentials::Sdk(creds) => {
                 let headers = creds
                     .headers(http::Extensions::default())

@@ -17,9 +17,12 @@ pub mod serde_utils;
 pub mod snapshot;
 pub mod storage;
 pub mod tool;
+#[cfg(feature = "full-types")]
 pub mod tool_context;
+#[cfg(feature = "full-types")]
 pub mod tool_error;
 pub mod tool_failure;
+#[cfg(feature = "full-types")]
 pub mod tool_handle;
 pub mod usage;
 
@@ -53,8 +56,10 @@ pub use snapshot::SnapshotHash;
 pub use storage::{StorageKind, StoragePath};
 use tensorzero_derive::TensorZeroDeserialize;
 pub use tool::{InferenceResponseToolCall, ToolCall, ToolCallWrapper, ToolChoice, ToolResult};
+#[cfg(feature = "full-types")]
 pub use tool_error::ToolError;
 pub use tool_failure::{NonControlToolError, ToolFailure};
+#[cfg(feature = "full-types")]
 pub use tool_handle::ToolHandle;
 pub use usage::{
     ApiType, FinishReason, OpenAIPromptTokensDetails, OpenAIUsage, RawResponseEntry, RawUsageEntry,

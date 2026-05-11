@@ -66,15 +66,20 @@ use moka::sync::Cache;
 use opentelemetry::trace::Status;
 use opentelemetry::trace::{Tracer, TracerProvider as _};
 use opentelemetry::{Context, KeyValue};
+#[cfg(feature = "otel-export")]
 use opentelemetry_otlp::WithTonicConfig;
-use opentelemetry_otlp::tonic_types::metadata::MetadataMap;
 use opentelemetry_sdk::Resource;
+#[cfg(not(feature = "otel-export"))]
+use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::SdkTracer;
+#[cfg(not(feature = "otel-export"))]
+use opentelemetry_sdk::trace::SpanData;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanExporter};
 use std::str::FromStr;
 use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::TaskTrackerToken;
 use tonic::metadata::AsciiMetadataKey;
+use tonic::metadata::MetadataMap;
 use tonic::metadata::MetadataValue;
 use tracing::level_filters::LevelFilter;
 use tracing::{Metadata, Span};
@@ -221,7 +226,7 @@ pub struct TracerWrapper {
 // Adds our self-signed certificate to the TLS config for Tonic
 // This is used in e2e test mode so that we can test gRPC export over TLS to
 // our local OTLP collector.
-#[cfg(feature = "e2e_tests")]
+#[cfg(all(feature = "e2e_tests", feature = "otel-export"))]
 fn add_local_self_signed_cert(
     tls_config: tonic::transport::ClientTlsConfig,
 ) -> tonic::transport::ClientTlsConfig {
@@ -231,6 +236,22 @@ fn add_local_self_signed_cert(
     ));
     tls_config.ca_certificate(tonic::transport::Certificate::from_pem(CERT))
 }
+
+#[cfg(not(feature = "otel-export"))]
+#[derive(Debug, Default)]
+struct NoopSpanExporter;
+
+#[cfg(not(feature = "otel-export"))]
+impl SpanExporter for NoopSpanExporter {
+    async fn export(&self, _batch: Vec<SpanData>) -> OTelSdkResult {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "otel-export")]
+type DefaultSpanExporter = opentelemetry_otlp::SpanExporter;
+#[cfg(not(feature = "otel-export"))]
+type DefaultSpanExporter = NoopSpanExporter;
 
 impl TracerWrapper {
     fn get_or_create_custom_tracer(
@@ -250,8 +271,7 @@ impl TracerWrapper {
             .custom_tracers
             .try_get_with_by_ref(key, || {
                 // We need to provide a dummy generic parameter to satisfy the compiler
-                let (provider, tracer) =
-                    build_tracer::<opentelemetry_otlp::SpanExporter>(key.clone(), None)?;
+                let (provider, tracer) = build_tracer::<DefaultSpanExporter>(key.clone(), None)?;
                 Ok::<_, Error>(Arc::new(CustomTracer {
                     inner: tracer,
                     provider: Some(provider),
@@ -269,10 +289,12 @@ fn build_tracer<T: SpanExporter + 'static>(
     key: CustomTracerKey,
     override_exporter: Option<T>,
 ) -> Result<(SdkTracerProvider, SdkTracer), Error> {
+    #[cfg(feature = "otel-export")]
     let tls_config = tonic::transport::ClientTlsConfig::new().with_enabled_roots();
-    #[cfg(feature = "e2e_tests")]
+    #[cfg(all(feature = "e2e_tests", feature = "otel-export"))]
     let tls_config = add_local_self_signed_cert(tls_config);
 
+    #[cfg(feature = "otel-export")]
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_metadata(key.extra_headers)
@@ -300,10 +322,20 @@ fn build_tracer<T: SpanExporter + 'static>(
             key.extra_attributes,
         ));
     } else {
-        builder = builder.with_batch_exporter(TensorZeroExporterWrapper::new(
-            exporter,
-            key.extra_attributes,
-        ));
+        #[cfg(feature = "otel-export")]
+        {
+            builder = builder.with_batch_exporter(TensorZeroExporterWrapper::new(
+                exporter,
+                key.extra_attributes,
+            ));
+        }
+        #[cfg(not(feature = "otel-export"))]
+        {
+            builder = builder.with_simple_exporter(TensorZeroExporterWrapper::new(
+                NoopSpanExporter,
+                key.extra_attributes,
+            ));
+        }
     }
     let provider = builder.build();
 
@@ -1084,7 +1116,7 @@ pub async fn setup_observability(
     is_http_gateway: bool,
 ) -> Result<ObservabilityHandle, Error> {
     // We need to provide a dummy generic parameter to satisfy the compiler
-    setup_observability_with_exporter_override::<opentelemetry_otlp::SpanExporter>(
+    setup_observability_with_exporter_override::<DefaultSpanExporter>(
         log_format,
         None,
         is_http_gateway,

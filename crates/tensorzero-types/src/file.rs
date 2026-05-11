@@ -5,6 +5,7 @@
 
 use crate::error::TypeError;
 use crate::storage::StoragePath;
+use base64::{Engine as _, engine::general_purpose};
 use mime::MediaType;
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
@@ -71,7 +72,7 @@ impl Base64File {
             mime_type
         } else {
             // Decode base64 and infer mime type from the data
-            let decoded = aws_smithy_types::base64::decode(&data).map_err(|e| {
+            let decoded = general_purpose::STANDARD.decode(&data).map_err(|e| {
                 TypeError::InvalidBase64(format!("Failed to decode base64 data: {e}"))
             })?;
 

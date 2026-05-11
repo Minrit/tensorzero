@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+#[cfg(feature = "gcp-vertex-providers")]
 use std::fmt::Display;
 
 use futures::StreamExt;
@@ -32,6 +33,7 @@ use crate::inference::types::{
     batch::StartBatchProviderInferenceResponse,
 };
 use crate::model::{ModelProviderRequestInfo, ProviderInferenceRequest};
+#[cfg(feature = "gcp-vertex-providers")]
 use tensorzero_inference_types::credential_validation::{
     e2e_skip_credential_validation, skip_credential_validation,
 };
@@ -69,6 +71,7 @@ pub struct GCPVertexAnthropicProvider {
     provider_tools: Vec<serde_json::Value>,
 }
 
+#[cfg(feature = "gcp-vertex-providers")]
 fn handle_gcp_error(
     provider_type: ProviderType,
     e: impl Display + Debug,
@@ -90,6 +93,7 @@ fn handle_gcp_error(
     }
 }
 
+#[cfg(feature = "gcp-vertex-providers")]
 pub async fn make_gcp_sdk_credentials(
     provider_type: ProviderType,
 ) -> Result<GCPVertexCredentials, Error> {
@@ -106,6 +110,17 @@ pub async fn make_gcp_sdk_credentials(
         Ok(_) => Ok(GCPVertexCredentials::Sdk(creds)),
         Err(e) => handle_gcp_error(provider_type, e),
     }
+}
+
+#[cfg(not(feature = "gcp-vertex-providers"))]
+pub async fn make_gcp_sdk_credentials(
+    provider_type: ProviderType,
+) -> Result<GCPVertexCredentials, Error> {
+    Err(Error::new(ErrorDetails::GCPCredentials {
+        message: format!(
+            "GCP SDK credentials for `{provider_type}` require the `gcp-vertex-providers` feature"
+        ),
+    }))
 }
 
 impl GCPVertexAnthropicProvider {

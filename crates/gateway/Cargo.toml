@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-tensorzero-core = { path = "../tensorzero-core" }
+tensorzero-core = { path = "../tensorzero-core", default-features = false }
 tensorzero-optimizers = { path = "../tensorzero-optimizers", optional = true }
 evaluations = { path = "../evaluations", optional = true }
 axum = { workspace = true }
@@ -40,7 +40,7 @@ workspace = true
 
 [features]
 default = ["lp-slim-gateway"]
-lp-slim-gateway = []
+lp-slim-gateway = ["tensorzero-core/lp-slim-core"]
 full-gateway = [
   "dep:autopilot-client",
   "dep:autopilot-tools",

@@ -1,6 +1,9 @@
-#![expect(non_snake_case)]
+#![cfg_attr(feature = "adaptive-experimentation", expect(non_snake_case))]
+#[cfg(feature = "adaptive-experimentation")]
 use clarabel::algebra::CscMatrix;
+#[cfg(feature = "adaptive-experimentation")]
 use clarabel::solver::SolverStatus;
+#[cfg(feature = "adaptive-experimentation")]
 use clarabel::solver::{
     DefaultSettings, DefaultSolver, IPSolver, NonnegativeConeT, SecondOrderConeT, SupportedConeT,
     ZeroConeT,
@@ -10,6 +13,7 @@ use thiserror::Error;
 
 use crate::config::MetricConfigOptimize;
 use crate::db::feedback::FeedbackByVariant;
+#[cfg(feature = "adaptive-experimentation")]
 use crate::experimentation::track_and_stop::check_stopping::choose_leader;
 
 /// Arguments for computing optimal sampling probabilities.
@@ -63,6 +67,10 @@ pub enum EstimateOptimalProbabilitiesError {
     CouldntBuildSolver,
     #[error("Missing variance for variant '{variant_name}' - variance must be non-null")]
     MissingVariance { variant_name: String },
+    #[error(
+        "Adaptive track-and-stop experimentation requires the `adaptive-experimentation` feature"
+    )]
+    FeatureDisabled,
 }
 /// Compute optimal sampling proportions for ε-best arm identification.
 ///
@@ -133,6 +141,14 @@ pub enum EstimateOptimalProbabilitiesError {
 /// That bound is for one-parameter exponential family models. We use the form of the
 /// bound for (sub-)Gaussian rewards with known variances and simply substitute in
 /// estimated variances.
+#[cfg(not(feature = "adaptive-experimentation"))]
+pub fn estimate_optimal_probabilities(
+    _args: EstimateOptimalProbabilitiesArgs,
+) -> Result<HashMap<String, f64>, EstimateOptimalProbabilitiesError> {
+    Err(EstimateOptimalProbabilitiesError::FeatureDisabled)
+}
+
+#[cfg(feature = "adaptive-experimentation")]
 pub fn estimate_optimal_probabilities(
     args: EstimateOptimalProbabilitiesArgs,
 ) -> Result<HashMap<String, f64>, EstimateOptimalProbabilitiesError> {
@@ -358,7 +374,7 @@ pub fn estimate_optimal_probabilities(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "adaptive-experimentation"))]
 mod tests {
     use super::*;
     use rand::rngs::StdRng;

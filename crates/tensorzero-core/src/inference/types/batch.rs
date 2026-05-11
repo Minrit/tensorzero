@@ -14,10 +14,7 @@ use crate::serde_util::deserialize_optional_json_string;
 use tensorzero_inference_types::ProviderToolCallConfig;
 
 use crate::{
-    endpoints::{
-        batch_inference::{BatchEpisodeIdInput, BatchOutputSchemas},
-        inference::{ChatCompletionInferenceParams, InferenceParams},
-    },
+    endpoints::inference::{ChatCompletionInferenceParams, InferenceParams},
     error::{Error, ErrorDetails},
     jsonschema_util::JSONSchema,
     tool::{ToolCallConfigDatabaseInsert, deserialize_optional_tool_info},
@@ -167,6 +164,9 @@ pub struct BatchModelInferenceRow<'a> {
 }
 
 pub use tensorzero_inference_types::UnparsedBatchRequestRow;
+
+pub type BatchEpisodeIdInput = Vec<Option<Uuid>>;
+pub type BatchOutputSchemas = Vec<Option<Value>>;
 
 /*  Below are types required for parsing and processing inputs for batch inference requests.
  *  The idea here is that we need to get a vector of the length of the number of inferences

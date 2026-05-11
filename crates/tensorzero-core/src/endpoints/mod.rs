@@ -9,14 +9,18 @@ use crate::utils::gateway::SwappableAppStateData;
 use axum::routing::MethodRouter;
 use std::convert::Infallible;
 
+#[cfg(feature = "full-gateway")]
 pub mod batch_inference;
 pub mod datasets;
 pub mod embeddings;
+#[cfg(feature = "full-gateway")]
 pub mod episodes;
 pub mod fallback;
 pub mod feedback;
+#[cfg(feature = "full-gateway")]
 pub mod functions;
 pub mod inference;
+#[cfg(feature = "full-gateway")]
 pub mod internal;
 pub mod namespace;
 pub mod object_storage;
@@ -24,9 +28,12 @@ pub mod openai_compatible;
 pub mod shared_types;
 pub mod status;
 pub mod stored_inferences;
+#[cfg(feature = "full-gateway")]
 pub mod ui;
+#[cfg(feature = "full-gateway")]
 pub mod variant_probabilities;
 pub mod workflow_evaluation_run;
+#[cfg(feature = "full-gateway")]
 pub mod workflow_evaluations;
 
 /// Helper struct to hold the data needed for a call to `Router.route`
