@@ -37,7 +37,7 @@ impl fmt::Display for OpenAICompatibleError {
 impl IntoResponse for OpenAICompatibleError {
     fn into_response(self) -> Response {
         let body = self.0.build_response_body(true, None);
-        let mut response = (self.0.status_code(), Json(body)).into_response();
+        let mut response = (self.0.response_status_code(), Json(body)).into_response();
         response.extensions_mut().insert(self.0);
         response
     }

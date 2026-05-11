@@ -206,6 +206,10 @@ impl Error {
         self.details.status_code()
     }
 
+    pub fn response_status_code(&self) -> StatusCode {
+        self.details.response_status_code()
+    }
+
     pub fn underlying_status_code(&self) -> Option<StatusCode> {
         self.details.underlying_status_code()
     }
@@ -351,7 +355,12 @@ impl Error {
             None
         };
         let body = self.build_response_body(openai_format, raw_response);
-        let mut response = (self.status_code(), Json(body)).into_response();
+        let status = if openai_format {
+            self.response_status_code()
+        } else {
+            self.status_code()
+        };
+        let mut response = (status, Json(body)).into_response();
         response.extensions_mut().insert(self);
         response
     }
@@ -1295,6 +1304,21 @@ impl ErrorDetails {
             ErrorDetails::Autopilot { status_code, .. } => status_code
                 .and_then(|code| StatusCode::from_u16(code).ok())
                 .unwrap_or(StatusCode::BAD_GATEWAY),
+        }
+    }
+
+    /// Defines the HTTP status code that provider-facing gateway routes should
+    /// return. This preserves provider-originated statuses through TensorZero
+    /// wrapper errors while leaving `status_code()` as the wrapper status used
+    /// in diagnostics.
+    fn response_status_code(&self) -> StatusCode {
+        match self {
+            ErrorDetails::AllVariantsFailed { .. }
+            | ErrorDetails::AllCandidatesFailed { .. }
+            | ErrorDetails::AllModelProvidersFailed { .. } => self
+                .underlying_status_code()
+                .unwrap_or_else(|| self.status_code()),
+            _ => self.status_code(),
         }
     }
 
@@ -2635,6 +2659,81 @@ mod tests {
         assert_eq!(error_json["tensorzero"]["streamPhase"], "pre_stream");
         assert_eq!(error_json["raw"]["available"], true);
         assert_eq!(error_json["raw"]["included"], false);
+    }
+
+    #[test]
+    fn openai_response_status_preserves_underlying_status_for_wrappers() {
+        let mut provider_errors = IndexMap::new();
+        provider_errors.insert(
+            "deepseek".to_string(),
+            Error::new(ErrorDetails::InferenceClient {
+                message: "The `reasoning_content` in the thinking mode must be passed back to the API."
+                    .to_string(),
+                status_code: Some(StatusCode::BAD_REQUEST),
+                provider_type: "openai".to_string(),
+                api_type: ApiType::ChatCompletions,
+                raw_request: None,
+                raw_response: Some(
+                    r#"{"error":{"message":"The `reasoning_content` in the thinking mode must be passed back to the API."}}"#
+                        .to_string(),
+                ),
+            }),
+        );
+        let error = Error::new(ErrorDetails::AllModelProvidersFailed { provider_errors });
+
+        assert_eq!(
+            error.status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "wrapper status stays available for diagnostics"
+        );
+        assert_eq!(
+            error.response_status_code(),
+            StatusCode::BAD_REQUEST,
+            "OpenAI-compatible response status should preserve provider status"
+        );
+    }
+
+    #[test]
+    fn openai_response_status_preserves_wrapper_when_no_underlying_status_exists() {
+        let error = Error::new(ErrorDetails::AllModelProvidersFailed {
+            provider_errors: IndexMap::new(),
+        });
+
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.response_status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[cfg(feature = "axum")]
+    #[test]
+    fn openai_into_response_uses_provider_status_but_default_response_keeps_wrapper_status() {
+        let mut provider_errors = IndexMap::new();
+        provider_errors.insert(
+            "deepseek".to_string(),
+            Error::new(ErrorDetails::InferenceClient {
+                message: "bad request".to_string(),
+                status_code: Some(StatusCode::BAD_REQUEST),
+                provider_type: "openai".to_string(),
+                api_type: ApiType::ChatCompletions,
+                raw_request: None,
+                raw_response: None,
+            }),
+        );
+        let error = Error::new(ErrorDetails::AllModelProvidersFailed { provider_errors });
+
+        assert_eq!(
+            error
+                .clone()
+                .into_response_with_raw_entries(true, false)
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            error.into_response_with_raw_entries(false, false).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
