@@ -826,17 +826,40 @@ fn openai_image_response(data: Vec<Value>) -> Value {
 }
 
 fn collect_dashscope_image_outputs(response_json: &Value, data: &mut Vec<Value>) {
-    for pointer in ["/output/results", "/output/choices", "/results", "/data"] {
+    for pointer in ["/output/results", "/results", "/data"] {
         if let Some(values) = response_json.pointer(pointer).and_then(Value::as_array) {
             collect_dashscope_image_array(values, data);
+        }
+    }
+    for pointer in ["/output/choices", "/choices"] {
+        if let Some(values) = response_json.pointer(pointer).and_then(Value::as_array) {
+            collect_dashscope_choice_array(values, data);
         }
     }
 }
 
 fn collect_dashscope_image_array(values: &[Value], data: &mut Vec<Value>) {
     for value in values {
+        collect_dashscope_image_object(value, data);
+    }
+}
+
+fn collect_dashscope_choice_array(values: &[Value], data: &mut Vec<Value>) {
+    for value in values {
+        collect_dashscope_image_object(value, data);
+        if let Some(content) = value
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .or_else(|| value.pointer("/delta/content").and_then(Value::as_array))
+        {
+            collect_dashscope_image_array(content, data);
+        }
+    }
+}
+
+fn collect_dashscope_image_object(value: &Value, data: &mut Vec<Value>) {
         let Some(object) = value.as_object() else {
-            continue;
+        return;
         };
         if let Some(encoded) = object
             .get("b64_json")
@@ -845,17 +868,17 @@ fn collect_dashscope_image_array(values: &[Value], data: &mut Vec<Value>) {
             .and_then(Value::as_str)
         {
             data.push(serde_json::json!({ "b64_json": encoded }));
-            continue;
+        return;
         }
         if let Some(url) = object
             .get("url")
             .or_else(|| object.get("image_url"))
             .or_else(|| object.get("imageUrl"))
+            .or_else(|| object.get("image"))
             .and_then(Value::as_str)
         {
             data.push(serde_json::json!({ "url": url }));
         }
-    }
 }
 
 fn dashscope_task_error(response_json: &Value, raw_response: String, provider_type: &str) -> Error {
@@ -1200,6 +1223,33 @@ mod tests {
         assert_eq!(
             normalized["data"][0]["url"],
             "https://cdn.example.com/image.png"
+        );
+    }
+
+    #[test]
+    fn dashscope_normalization_reads_multimodal_choice_content_images() {
+        let params = image_params("qwen", "dashscope");
+        let response = serde_json::json!({
+            "output": {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{
+                            "image": "https://dashscope-result.example.com/wan.png"
+                        }]
+                    }
+                }]
+            },
+            "usage": {
+                "image_count": 1
+            }
+        });
+
+        let normalized = normalize_dashscope_response(&response, &params).unwrap();
+        assert_eq!(
+            normalized["data"][0]["url"],
+            "https://dashscope-result.example.com/wan.png"
         );
     }
 
