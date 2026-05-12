@@ -21,6 +21,7 @@ use super::{OpenAICompatibleError, OpenAIStructuredJson};
 const DASH_SCOPE_ASYNC_HEADER: &str = "X-DashScope-Async";
 const DASH_SCOPE_MAX_POLLS: usize = 60;
 const DASH_SCOPE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const IMAGE_CALL_MODE_MISMATCH_MARKER: &str = "provider_call_mode_unsupported";
 
 pub async fn image_generations_handler(
     State(AppStateData { http_client, .. }): AppState,
@@ -95,7 +96,8 @@ async fn relay_dashscope_image_generation(
     let request_url = required_image_generation_url(params, &provider_type)?;
     let api_key = params.provider_api_key()?;
     let request_body = dashscope_request_body(params, request_url.path());
-    let is_async = dashscope_requires_async(params.provider_model().as_deref());
+    let call_mode = dashscope_call_mode(params)?;
+    let is_async = call_mode == DashScopeImageCallMode::Async;
 
     let mut request = http_client
         .post(request_url)
@@ -442,9 +444,15 @@ fn provider_image_error(
     request_id: Option<&str>,
     provider_type: &str,
 ) -> Error {
-    let message = match request_id {
-        Some(id) => format!("{raw_response} [request_id: {id}]"),
+    let message = match classify_call_mode_mismatch(raw_response) {
+        Some(mode) => format!(
+            "{IMAGE_CALL_MODE_MISMATCH_MARKER}: attempted_call_mode={mode}; provider returned that this API does not support the attempted image call mode"
+        ),
         None => raw_response.to_string(),
+    };
+    let message = match request_id {
+        Some(id) => format!("{message} [request_id: {id}]"),
+        None => message,
     };
     match status {
         StatusCode::BAD_REQUEST
@@ -465,6 +473,23 @@ fn provider_image_error(
             provider_type: provider_type.to_string(),
             api_type: ApiType::Images,
         }),
+    }
+}
+
+fn classify_call_mode_mismatch(raw_response: &str) -> Option<&'static str> {
+    let response = raw_response.to_ascii_lowercase();
+    if response.contains("does not support asynchronous calls")
+        || response.contains("not support asynchronous calls")
+        || response.contains("does not support async calls")
+    {
+        Some("async")
+    } else if response.contains("does not support synchronous calls")
+        || response.contains("not support synchronous calls")
+        || response.contains("does not support sync calls")
+    {
+        Some("sync")
+    } else {
+        None
     }
 }
 
@@ -549,13 +574,56 @@ fn dashscope_request_body(
     }
 }
 
-fn dashscope_requires_async(model: Option<&str>) -> bool {
-    model
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashScopeImageCallMode {
+    Sync,
+    Async,
+}
+
+fn dashscope_call_mode(
+    params: &OpenAICompatibleImageGenerationParams,
+) -> Result<DashScopeImageCallMode, Error> {
+    if let Some(call_mode) = params.image_call_mode() {
+        return match call_mode.as_str() {
+            "sync" => Ok(DashScopeImageCallMode::Sync),
+            "async" => Ok(DashScopeImageCallMode::Async),
+            "stream" => Err(Error::new(ErrorDetails::InvalidOpenAICompatibleRequest {
+                message: "DashScope image generation does not support callMode=stream through images/generations yet".to_string(),
+            })),
+            other => Err(Error::new(ErrorDetails::InvalidOpenAICompatibleRequest {
+                message: format!("unsupported DashScope image call mode '{other}'"),
+            })),
+        };
+    }
+    let endpoint_family = params.image_endpoint_family();
+    match endpoint_family.as_deref() {
+        Some("dashscope-text2image-async") => Ok(DashScopeImageCallMode::Async),
+        Some("dashscope-multimodal-generation") => Ok(DashScopeImageCallMode::Sync),
+        Some(other) => Err(Error::new(ErrorDetails::InvalidOpenAICompatibleRequest {
+            message: format!("unsupported DashScope image endpoint family '{other}'"),
+        })),
+        None => Ok(dashscope_legacy_call_mode(
+            params.provider_model().as_deref(),
+        )),
+    }
+}
+
+fn dashscope_legacy_call_mode(model: Option<&str>) -> DashScopeImageCallMode {
+    if model
         .map(|model| {
             let model = model.to_ascii_lowercase();
             model.starts_with("wan2.7") || model.contains("wan2.7-image-pro")
         })
         .unwrap_or(false)
+    {
+        tracing::warn!(
+            model = model.unwrap_or_default(),
+            "DashScope image generation fell back to model-name async inference; inject image_call_mode to avoid this compatibility path"
+        );
+        DashScopeImageCallMode::Async
+    } else {
+        DashScopeImageCallMode::Sync
+    }
 }
 
 fn dashscope_task_url(template: &str, task_id: &str) -> Result<Url, Error> {
@@ -894,6 +962,31 @@ mod tests {
         .unwrap()
     }
 
+    fn dashscope_image_params_with_contract(
+        model: &str,
+        endpoint_family: &str,
+        call_mode: Option<&str>,
+    ) -> OpenAICompatibleImageGenerationParams {
+        let mut credentials = serde_json::json!({
+            "openai_api_key": "secret",
+            "provider_type": "dashscope-token-plan",
+            "image_provider_family": "dashscope",
+            "image_endpoint_family": endpoint_family,
+            "image_generation_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        });
+        if let Some(call_mode) = call_mode {
+            credentials["image_call_mode"] = serde_json::Value::String(call_mode.to_string());
+        }
+        serde_json::from_value(serde_json::json!({
+            "model": model,
+            "prompt": "a shrimp factory",
+            "n": 1,
+            "size": "1024x1024",
+            "tensorzero::credentials": credentials
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn image_url_appends_generations_path() {
         let url = image_generations_url("https://example.com/openai/v1").unwrap();
@@ -939,6 +1032,56 @@ mod tests {
     }
 
     #[test]
+    fn image_error_classifies_dashscope_async_mismatch() {
+        let error = provider_image_error(
+            StatusCode::FORBIDDEN,
+            "{}",
+            r#"{"code":"AccessDenied","message":"current user api does not support asynchronous calls"}"#,
+            Some("req_async"),
+            "dashscope-token-plan",
+        );
+
+        let body = error.build_response_body(true, None);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("provider_call_mode_unsupported")
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("attempted_call_mode=async")
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("req_async")
+        );
+    }
+
+    #[test]
+    fn image_error_leaves_unrelated_provider_403_generic() {
+        let error = provider_image_error(
+            StatusCode::FORBIDDEN,
+            "{}",
+            r#"{"code":"AccessDenied","message":"quota denied"}"#,
+            None,
+            "dashscope-token-plan",
+        );
+
+        let body = error.build_response_body(true, None);
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("provider_call_mode_unsupported")
+        );
+    }
+
+    #[test]
     fn image_provider_family_prefers_lp_injected_family() {
         let params = image_params("new-dashscope-alias", "dashscope");
         assert!(matches!(
@@ -972,6 +1115,75 @@ mod tests {
 
         assert_eq!(body["input"]["prompt"], "a shrimp factory");
         assert!(body["input"].get("messages").is_none());
+    }
+
+    #[test]
+    fn dashscope_call_mode_explicit_sync_beats_wan_model_name() {
+        let params = dashscope_image_params_with_contract(
+            "wan2.7-image-pro",
+            "dashscope-multimodal-generation",
+            Some("sync"),
+        );
+
+        assert_eq!(
+            dashscope_call_mode(&params).unwrap(),
+            DashScopeImageCallMode::Sync
+        );
+        let provider_body = params.provider_request_body();
+        assert!(provider_body.get("image_call_mode").is_none());
+        assert!(provider_body.get("image_endpoint_family").is_none());
+    }
+
+    #[test]
+    fn dashscope_call_mode_explicit_async_requires_task_contract() {
+        let params = dashscope_image_params_with_contract(
+            "qwen-image-2.0-pro",
+            "dashscope-text2image-async",
+            Some("async"),
+        );
+
+        assert_eq!(
+            dashscope_call_mode(&params).unwrap(),
+            DashScopeImageCallMode::Async
+        );
+    }
+
+    #[test]
+    fn dashscope_call_mode_falls_back_to_legacy_model_name_only_without_contract() {
+        let params: OpenAICompatibleImageGenerationParams =
+            serde_json::from_value(serde_json::json!({
+                "model": "wan2.7-image-pro",
+                "prompt": "a shrimp factory",
+                "tensorzero::credentials": {
+                    "openai_api_key": "secret",
+                    "provider_type": "dashscope-token-plan",
+                    "image_provider_family": "dashscope",
+                    "image_generation_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+                }
+            }))
+            .unwrap();
+
+        assert_eq!(
+            dashscope_call_mode(&params).unwrap(),
+            DashScopeImageCallMode::Async
+        );
+    }
+
+    #[test]
+    fn dashscope_call_mode_rejects_unknown_explicit_mode() {
+        let params = dashscope_image_params_with_contract(
+            "qwen-image-2.0-pro",
+            "dashscope-multimodal-generation",
+            Some("realtime"),
+        );
+
+        let error = dashscope_call_mode(&params).unwrap_err();
+        match error.get_details() {
+            ErrorDetails::InvalidOpenAICompatibleRequest { message } => {
+                assert!(message.contains("unsupported DashScope image call mode"));
+            }
+            _ => panic!("Expected InvalidOpenAICompatibleRequest error"),
+        }
     }
 
     #[test]

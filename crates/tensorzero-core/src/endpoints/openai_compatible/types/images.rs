@@ -97,6 +97,26 @@ impl OpenAICompatibleImageGenerationParams {
             .filter(|value| !value.is_empty())
     }
 
+    pub fn image_endpoint_family(&self) -> Option<String> {
+        self.tensorzero_credentials
+            .get("image_endpoint_family")
+            .or_else(|| self.tensorzero_credentials.get("imageEndpointFamily"))
+            .or_else(|| self.tensorzero_credentials.get("endpoint_family"))
+            .or_else(|| self.tensorzero_credentials.get("endpointFamily"))
+            .map(|value| value.expose_secret().trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn image_call_mode(&self) -> Option<String> {
+        self.tensorzero_credentials
+            .get("image_call_mode")
+            .or_else(|| self.tensorzero_credentials.get("imageCallMode"))
+            .or_else(|| self.tensorzero_credentials.get("call_mode"))
+            .or_else(|| self.tensorzero_credentials.get("callMode"))
+            .map(|value| value.expose_secret().trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+    }
+
     pub fn image_generation_url(&self) -> Option<&SecretString> {
         self.tensorzero_credentials
             .get("image_generation_url")
@@ -229,6 +249,8 @@ mod tests {
                     "openai_api_key": "secret",
                     "provider_type": "qwen",
                     "image_provider_family": "dashscope",
+                    "image_endpoint_family": "dashscope-multimodal-generation",
+                    "image_call_mode": "sync",
                     "image_generation_url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis",
                     "image_task_url_template": "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
                 }
@@ -237,6 +259,11 @@ mod tests {
 
         assert_eq!(params.provider_type(), "qwen");
         assert_eq!(params.image_provider_family().as_deref(), Some("dashscope"));
+        assert_eq!(
+            params.image_endpoint_family().as_deref(),
+            Some("dashscope-multimodal-generation")
+        );
+        assert_eq!(params.image_call_mode().as_deref(), Some("sync"));
         assert_eq!(
             params.image_generation_url().unwrap().expose_secret(),
             "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
