@@ -199,10 +199,7 @@ impl OpenAIProvider {
     }
 
     /// Resolve the effective api_base URL, falling back to OPENAI_DEFAULT_BASE_URL.
-    fn resolve_api_base(
-        &self,
-        dynamic_api_keys: &InferenceCredentials,
-    ) -> Result<Url, Error> {
+    fn resolve_api_base(&self, dynamic_api_keys: &InferenceCredentials) -> Result<Url, Error> {
         match &self.api_base {
             Some(base) => base.resolve(dynamic_api_keys),
             None => Ok(OPENAI_DEFAULT_BASE_URL.clone()),
@@ -5314,7 +5311,9 @@ mod tests {
         // Valid cases (should not warn)
         let _ = OpenAIProvider::new(
             model_name.clone(),
-            Some(DynamicApiBase::Static(Url::parse("http://localhost:1234/v1/").unwrap())),
+            Some(DynamicApiBase::Static(
+                Url::parse("http://localhost:1234/v1/").unwrap(),
+            )),
             OpenAICredentials::None,
             OpenAIAPIType::ChatCompletions,
             false,
@@ -5324,7 +5323,9 @@ mod tests {
 
         let _ = OpenAIProvider::new(
             model_name.clone(),
-            Some(DynamicApiBase::Static(Url::parse("http://localhost:1234/v1").unwrap())),
+            Some(DynamicApiBase::Static(
+                Url::parse("http://localhost:1234/v1").unwrap(),
+            )),
             OpenAICredentials::None,
             OpenAIAPIType::ChatCompletions,
             false,

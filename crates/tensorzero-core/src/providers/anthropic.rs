@@ -168,10 +168,7 @@ impl AnthropicProvider {
     }
 
     /// Resolve the effective api_base URL at inference time, falling back to ANTHROPIC_DEFAULT_BASE_URL.
-    fn resolve_base_url(
-        &self,
-        dynamic_api_keys: &InferenceCredentials,
-    ) -> Result<Url, Error> {
+    fn resolve_base_url(&self, dynamic_api_keys: &InferenceCredentials) -> Result<Url, Error> {
         match &self.api_base {
             Some(base) => {
                 let url = base.resolve(dynamic_api_keys)?;

@@ -1161,21 +1161,17 @@ impl DynamicApiBase {
                     );
                     Ok(DynamicApiBase::Dynamic(key_name))
                 }
-                CredentialLocation::None => {
-                    Err(Error::new(ErrorDetails::Config {
-                        message: format!(
-                            "`api_base = \"none\"` is not supported for `{provider_type}`. \
+                CredentialLocation::None => Err(Error::new(ErrorDetails::Config {
+                    message: format!(
+                        "`api_base = \"none\"` is not supported for `{provider_type}`. \
                              Omit the field to use the default, or specify a URL."
-                        ),
-                    }))
-                }
-                other => {
-                    Err(Error::new(ErrorDetails::Config {
-                        message: format!(
-                            "Unsupported credential location `{other:?}` for `api_base` of `{provider_type}` provider."
-                        ),
-                    }))
-                }
+                    ),
+                })),
+                other => Err(Error::new(ErrorDetails::Config {
+                    message: format!(
+                        "Unsupported credential location `{other:?}` for `api_base` of `{provider_type}` provider."
+                    ),
+                })),
             },
         }
     }

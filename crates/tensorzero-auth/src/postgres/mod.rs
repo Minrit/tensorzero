@@ -88,6 +88,37 @@ pub enum AuthResult {
     MissingKey,
 }
 
+/// Result of validating an API key, suitable for serialization across language boundaries
+/// (NAPI → TypeScript). Auth-related outcomes are encoded as variants here so that
+/// callers can distinguish them from infrastructure failures (which propagate as thrown
+/// errors at the NAPI layer).
+#[derive(ts_rs::TS, Debug, Clone, Serialize)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApiKeyValidationResult {
+    /// The API key parsed and matches an active, non-expired row.
+    Success { key_info: KeyInfo },
+    /// The provided string did not parse as a TensorZero API key.
+    InvalidFormat,
+    /// The provided key parsed but does not exist in the database.
+    Missing,
+    /// The provided key exists but has been disabled.
+    Disabled,
+    /// The provided key exists but is past its expiration.
+    Expired,
+}
+
+impl From<AuthResult> for ApiKeyValidationResult {
+    fn from(result: AuthResult) -> Self {
+        match result {
+            AuthResult::Success(key_info) => Self::Success { key_info },
+            AuthResult::Disabled(_, _) => Self::Disabled,
+            AuthResult::Expired(_, _) => Self::Expired,
+            AuthResult::MissingKey => Self::Missing,
+        }
+    }
+}
+
 #[derive(ts_rs::TS, sqlx::FromRow, Debug, PartialEq, Eq, Clone, Serialize)]
 #[ts(export)]
 pub struct KeyInfo {
@@ -175,18 +206,44 @@ pub async fn update_key_description(
     Ok(key)
 }
 
-/// Lists all API keys in the database, optionally filtered by organization,
-/// with an optional limit and offset.
+/// Fetches metadata for a single API key by its `public_id`.
+/// Returns `Ok(None)` if no key with that `public_id` exists.
+pub async fn get_key_info(
+    public_id: &str,
+    pool: &PgPool,
+) -> Result<Option<KeyInfo>, TensorZeroAuthError> {
+    let key = sqlx::query_as!(
+        KeyInfo,
+        "SELECT public_id, organization, workspace, description, created_at, disabled_at, expires_at \
+         FROM tensorzero_auth_api_key \
+         WHERE public_id = $1",
+        public_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(key)
+}
+
+/// Lists all API keys in the database, optionally filtered by organization
+/// and/or workspace, with an optional limit and offset.
+///
+/// Workspace names are not unique across organizations, so the `workspace`
+/// filter requires an `organization` filter to be set.
 pub async fn list_key_info(
     organization: Option<String>,
+    workspace: Option<String>,
     limit: Option<u32>,
     offset: Option<u32>,
     pool: &PgPool,
 ) -> Result<Vec<KeyInfo>, TensorZeroAuthError> {
+    if workspace.is_some() && organization.is_none() {
+        return Err(TensorZeroAuthError::WorkspaceFilterRequiresOrganization);
+    }
     let keys = sqlx::query_as!(
         KeyInfo,
-        "SELECT public_id, organization, workspace, description, created_at, disabled_at, expires_at FROM tensorzero_auth_api_key WHERE (organization = $1 OR $1 is NULL) ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        "SELECT public_id, organization, workspace, description, created_at, disabled_at, expires_at FROM tensorzero_auth_api_key WHERE (organization = $1 OR $1 is NULL) AND (workspace = $2 OR $2 is NULL) ORDER BY created_at DESC LIMIT $3 OFFSET $4",
         organization,
+        workspace,
         // We take in a 'u32' and convert to 'i64' to avoid any weirdness around negative values
         // Postgres does the right thing when the LIMIT or OFFSET is null (it gets ignored)
         limit.map(i64::from),

@@ -23,14 +23,25 @@ use reqwest::{NoProxy, Proxy};
 use reqwest_sse_stream::{Event, RequestBuilderExt, ReqwestSseStreamError};
 use serde::{Serialize, de::DeserializeOwned};
 
+use std::borrow::Cow;
 use std::ops::Deref;
 
-use tensorzero_error::{DisplayOrDebugGateway, Error, ErrorDetails, IMPOSSIBLE_ERROR_MESSAGE};
-use tensorzero_types::usage::ApiType;
+pub mod api_type;
+pub mod error;
+
+pub use api_type::ApiType;
+pub use error::HttpClientError;
+
+const IMPOSSIBLE_ERROR_MESSAGE: &str = "This should never happen, please file a bug report at https://github.com/tensorzero/tensorzero/discussions/new?category=bug-reports";
 
 pub const TENSORZERO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const TENSORZERO_EXTERNAL_SPAN_ATTRIBUTE_NAME: &str = "tensorzero.overhead.external_span";
+
+/// Default environment variable consulted (when the `e2e_tests` feature is
+/// enabled) for an outbound HTTP proxy URL. Override via
+/// [`TensorzeroHttpClient::new_with_proxy_env_var`].
+pub const DEFAULT_PROXY_ENV_VAR: &str = "TENSORZERO_E2E_PROXY";
 
 /// This is `Cow` without the `T: Clone` bound.
 /// Useful when we want a `Cow`, but don't want to (or can't) implement `Clone`
@@ -166,6 +177,10 @@ pub struct TensorzeroHttpClient {
     /// Per-read timeout (resets on each successful read). `None` disables it.
     /// Configured via `gateway.global_outbound_http_intra_stream_read_timeout_ms`.
     global_outbound_http_intra_stream_read_timeout: Option<Duration>,
+    /// Name of the env var consulted for an outbound HTTP proxy URL when the
+    /// `e2e_tests` feature is enabled. Stored regardless of feature flag so
+    /// that callers do not need to feature-gate construction.
+    proxy_env_var: Cow<'static, str>,
 }
 
 #[cfg(any(test, feature = "e2e_tests", feature = "pyo3"))]
@@ -179,13 +194,29 @@ impl Default for TensorzeroHttpClient {
 
 impl TensorzeroHttpClient {
     #[cfg(any(test, feature = "e2e_tests", feature = "pyo3"))]
-    pub fn new_testing() -> Result<Self, Error> {
+    pub fn new_testing() -> Result<Self, HttpClientError> {
         Self::new(DEFAULT_HTTP_CLIENT_TIMEOUT, None)
     }
     pub fn new(
         global_outbound_http_timeout: Duration,
         global_outbound_http_intra_stream_read_timeout: Option<Duration>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, HttpClientError> {
+        Self::new_with_proxy_env_var(
+            global_outbound_http_timeout,
+            global_outbound_http_intra_stream_read_timeout,
+            Cow::Borrowed(DEFAULT_PROXY_ENV_VAR),
+        )
+    }
+
+    /// Like [`Self::new`], but lets the caller override the env var consulted
+    /// for an outbound HTTP proxy URL. The env var is only read when the
+    /// `e2e_tests` feature is enabled.
+    pub fn new_with_proxy_env_var(
+        global_outbound_http_timeout: Duration,
+        global_outbound_http_intra_stream_read_timeout: Option<Duration>,
+        proxy_env_var: impl Into<Cow<'static, str>>,
+    ) -> Result<Self, HttpClientError> {
+        let proxy_env_var = proxy_env_var.into();
         let clients = (0..MAX_NUM_CLIENTS)
             .map(|_| OnceCell::new())
             .collect::<Vec<_>>();
@@ -196,10 +227,12 @@ impl TensorzeroHttpClient {
                 client: build_client(
                     global_outbound_http_timeout,
                     global_outbound_http_intra_stream_read_timeout,
+                    &proxy_env_var,
                 )?,
             }),
             global_outbound_http_timeout,
             global_outbound_http_intra_stream_read_timeout,
+            proxy_env_var,
         };
         // Eagerly initialize the first `OnceCell` in the array
         client.take_ticket();
@@ -209,19 +242,21 @@ impl TensorzeroHttpClient {
     fn take_ticket(&self) -> LimitedClientTicket<'_> {
         for client_cell in self.clients.iter() {
             let client = match client_cell.get_or_try_init(|| {
-                Ok::<_, Error>(LimitedClient {
+                Ok::<_, HttpClientError>(LimitedClient {
                     concurrent_requests: Arc::new(AtomicU8::new(0)),
                     client: build_client(
                         self.global_outbound_http_timeout,
                         self.global_outbound_http_intra_stream_read_timeout,
+                        &self.proxy_env_var,
                     )?,
                 })
             }) {
                 Ok(client) => client,
-                Err(_) => {
-                    // The error was already logged - continue on and try to access
-                    // the next `OnceCell` in the array. If all of them fail on this
-                    // pass through the loop, we'll end up using the fallback client.
+                Err(e) => {
+                    tracing::error!("Failed to build HTTP client: {e}");
+                    // Continue on and try to access the next `OnceCell` in the
+                    // array. If all of them fail on this pass through the loop,
+                    // we'll end up using the fallback client.
                     continue;
                 }
             };
@@ -252,9 +287,7 @@ impl TensorzeroHttpClient {
         // When this happens, we gracefully degrade to our behavior before `TensorzeroHttpClient`
         // was introduced (sharing a single `reqwest::Client` instance, which will limit the
         // concurrency for HTTP2 requests to the same host).
-        Error::new(ErrorDetails::InternalError {
-            message: format!("No available HTTP clients. {IMPOSSIBLE_ERROR_MESSAGE}"),
-        });
+        tracing::error!("No available HTTP clients. {IMPOSSIBLE_ERROR_MESSAGE}");
         LimitedClientTicket {
             client: CowNoClone::Borrowed(&self.fallback_client),
             // The fallback client has no limit, so don't decrement its counter when we drop it
@@ -640,18 +673,16 @@ impl<'a> TensorzeroRequestBuilder<'a> {
         mut self,
         provider_type: &str,
         api_type: ApiType,
-    ) -> Result<T, Error> {
+    ) -> Result<T, HttpClientError> {
         self = self.with_otlp_headers();
         let (client, request) = self.builder.build_split();
-        let request = request.map_err(|e| {
-            Error::new(ErrorDetails::InferenceClient {
-                status_code: None,
-                message: format!("Error building request: {}", DisplayOrDebugGateway::new(e)),
-                provider_type: provider_type.to_string(),
-                api_type,
-                raw_request: None,
-                raw_response: None,
-            })
+        let request = request.map_err(|e| HttpClientError::InferenceClient {
+            status_code: None,
+            message: format!("Error building request: {e}"),
+            provider_type: provider_type.to_string(),
+            api_type,
+            raw_request: None,
+            raw_response: None,
         })?;
         let url = request.url().clone();
         let raw_body = request
@@ -665,15 +696,13 @@ impl<'a> TensorzeroRequestBuilder<'a> {
                 { TENSORZERO_EXTERNAL_SPAN_ATTRIBUTE_NAME } = true
             ))
             .await
-            .map_err(|e| {
-                Error::new(ErrorDetails::InferenceClient {
-                    status_code: e.status(),
-                    message: format!("Error sending request: {}", DisplayOrDebugGateway::new(e)),
-                    provider_type: provider_type.to_string(),
-                    api_type,
-                    raw_request: raw_body.clone(),
-                    raw_response: None,
-                })
+            .map_err(|e| HttpClientError::InferenceClient {
+                status_code: e.status(),
+                message: format!("Error sending request: {e}"),
+                provider_type: provider_type.to_string(),
+                api_type,
+                raw_request: raw_body.clone(),
+                raw_response: None,
             })?;
 
         let status_code = response.status();
@@ -686,40 +715,34 @@ impl<'a> TensorzeroRequestBuilder<'a> {
                 { TENSORZERO_EXTERNAL_SPAN_ATTRIBUTE_NAME } = true
             ))
             .await
-            .map_err(|e| {
-                Error::new(ErrorDetails::InferenceClient {
-                    status_code: e.status(),
-                    message: format!("Error sending request: {}", DisplayOrDebugGateway::new(e)),
-                    provider_type: provider_type.to_string(),
-                    api_type,
-                    raw_request: raw_body.clone(),
-                    raw_response: None,
-                })
+            .map_err(|e| HttpClientError::InferenceClient {
+                status_code: e.status(),
+                message: format!("Error sending request: {e}"),
+                provider_type: provider_type.to_string(),
+                api_type,
+                raw_request: raw_body.clone(),
+                raw_response: None,
             })?;
 
         if !status_code.is_success() {
-            return Err(Error::new(ErrorDetails::InferenceClient {
+            return Err(HttpClientError::InferenceClient {
                 status_code: Some(status_code),
-                message: format!("Non-successful status code for url `{url}`",),
+                message: format!("Non-successful status code for url `{url}`"),
                 provider_type: provider_type.to_string(),
                 api_type,
                 raw_request: raw_body.clone(),
                 raw_response: Some(raw_response.clone()),
-            }));
+            });
         }
 
-        let res: T = serde_json::from_str(&raw_response).map_err(|e| {
-            Error::new(ErrorDetails::InferenceServer {
-                message: format!(
-                    "Error parsing JSON response: {}",
-                    DisplayOrDebugGateway::new(e)
-                ),
+        let res: T =
+            serde_json::from_str(&raw_response).map_err(|e| HttpClientError::InferenceServer {
+                message: format!("Error parsing JSON response: {e}"),
                 raw_request: raw_body.clone(),
                 raw_response: Some(raw_response.clone()),
                 provider_type: provider_type.to_string(),
                 api_type,
-            })
-        })?;
+            })?;
         Ok(res)
     }
 }
@@ -731,12 +754,14 @@ pub const DEFAULT_HTTP_CLIENT_TIMEOUT: Duration = Duration::seconds(15 * 60);
 fn build_client(
     global_outbound_http_timeout: Duration,
     global_outbound_http_intra_stream_read_timeout: Option<Duration>,
-) -> Result<Client, Error> {
+    proxy_env_var: &str,
+) -> Result<Client, HttpClientError> {
+    #[cfg(not(feature = "e2e_tests"))]
+    let _ = proxy_env_var;
     let to_std = |d: Duration, field: &str| {
-        d.to_std().map_err(|e| {
-            Error::new(ErrorDetails::InternalError {
-                message: format!("Failed to convert `{field}` to std::time::Duration: {e}"),
-            })
+        d.to_std().map_err(|e| HttpClientError::ConvertDuration {
+            field: field.to_string(),
+            message: e.to_string(),
         })
     };
 
@@ -755,15 +780,13 @@ fn build_client(
     }
 
     #[cfg(feature = "e2e_tests")]
-    if let Ok(proxy_url) = std::env::var("TENSORZERO_E2E_PROXY") {
-        tracing::info!("Using proxy URL from TENSORZERO_E2E_PROXY: {proxy_url}");
+    if let Ok(proxy_url) = std::env::var(proxy_env_var) {
+        tracing::info!("Using proxy URL from {proxy_env_var}: {proxy_url}");
         http_client_builder = http_client_builder
                 .proxy(
                     Proxy::all(proxy_url)
-                        .map_err(|e| {
-                            Error::new(ErrorDetails::AppState {
-                                message: format!("Invalid proxy URL: {e}"),
-                            })
+                        .map_err(|e| HttpClientError::InvalidProxyUrl {
+                            message: e.to_string(),
                         })?
                         .no_proxy(NoProxy::from_string(
                             "localhost,0.0.0.0,127.0.0.1,minio,mock-provider-api,gateway,provider-proxy,clickhouse",
@@ -774,11 +797,11 @@ fn build_client(
                 .danger_accept_invalid_certs(true);
     }
 
-    http_client_builder.build().map_err(|e| {
-        Error::new(ErrorDetails::AppState {
-            message: format!("Failed to build HTTP client: {e}"),
+    http_client_builder
+        .build()
+        .map_err(|e| HttpClientError::BuildClient {
+            message: e.to_string(),
         })
-    })
 }
 
 #[cfg(test)]

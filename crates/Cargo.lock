@@ -544,13 +544,13 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "autopilot-client"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "chrono",
  "durable-tools-spawn",
  "futures",
  "moka",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "reqwest-sse-stream",
  "schemars 1.2.1",
  "secrecy",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "autopilot-tools"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "autopilot-worker"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "bip39-uuid-substitution"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "blake3",
  "proptest",
@@ -1347,9 +1347,9 @@ dependencies = [
 
 [[package]]
 name = "blake3"
-version = "1.8.4"
+version = "1.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d2d5991425dfd0785aed03aedcf0b321d61975c9b5b3689c774a2610ae0b51e"
+checksum = "0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce"
 dependencies = [
  "arrayref",
  "arrayvec",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "config-applier"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "pathdiff",
  "schemars 1.2.1",
@@ -2122,19 +2122,9 @@ dependencies = [
 
 [[package]]
 name = "ctor"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95d0d11eb38e7642efca359c3cf6eb7b2e528182d09110165de70192b0352775"
-dependencies = [
- "ctor-proc-macro",
- "dtor",
-]
-
-[[package]]
-name = "ctor-proc-macro"
-version = "0.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7ab264ea985f1bd27887d7b21ea2bb046728e05d11909ca138d700c494730db"
+checksum = "400a21f1014a968ec518c7ccdf9b4a4ed0cac8c56ccb6d604f8b91f00110501e"
 
 [[package]]
 name = "ctutils"
@@ -2611,21 +2601,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
 
 [[package]]
-name = "dtor"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17f72721db8027a4e96dd6fb50d2a1d32259c9d3da1b63dee612ccd981e14293"
-dependencies = [
- "dtor-proc-macro",
-]
-
-[[package]]
-name = "dtor-proc-macro"
-version = "0.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c98b077c7463d01d22dde8a24378ddf1ca7263dc687cffbed38819ea6c21131"
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2655,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "durable-tools"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2690,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "durable-tools-spawn"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "async-trait",
  "durable",
@@ -2864,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "evaluations"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2932,9 +2907,9 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
+checksum = "e1e1dacd0d2082dfcf1351c4bdd566bbe89a2b263235a2b50058f1e130a47277"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -2978,7 +2953,7 @@ dependencies = [
 
 [[package]]
 name = "feedback-load-test"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3247,7 +3222,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "async-stream",
  "autopilot-client",
@@ -3265,7 +3240,7 @@ dependencies = [
  "http-body-util",
  "metrics-exporter-prometheus",
  "mimalloc",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "reqwest-sse-stream",
  "rmcp",
  "secrecy",
@@ -3397,7 +3372,7 @@ dependencies = [
  "hmac 0.13.0",
  "http 1.4.0",
  "jsonwebtoken",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "rustc_version",
  "rustls",
  "rustls-pki-types",
@@ -3473,7 +3448,7 @@ dependencies = [
 
 [[package]]
 name = "googletest-matchers"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "googletest",
  "serde_json",
@@ -4143,9 +4118,9 @@ dependencies = [
 
 [[package]]
 name = "init-tracing-opentelemetry"
-version = "0.36.1"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3910c652151948e4fb51a8c86cad13b8e3d36b9c4268060ca8456ddfad058749"
+checksum = "3595b2c706a728e1f30ac82074a6603487835602bde51fe179d2961afef9732c"
 dependencies = [
  "opentelemetry",
  "opentelemetry-aws",
@@ -4364,9 +4339,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.46.2"
+version = "0.46.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50180452e7808015fe083eae3efcf1ec98b89b45dd8cc204f7b4a6b7b81ea675"
+checksum = "cbe92a2f8b00686061eab5cdcfd6f382c27f2084456e7be90ae9f0fe4a30552a"
 dependencies = [
  "ahash 0.8.12",
  "bytecount",
@@ -4383,7 +4358,7 @@ dependencies = [
  "referencing",
  "regex",
  "regex-syntax",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "rustls",
  "serde",
  "serde_json",
@@ -4828,7 +4803,7 @@ dependencies = [
 
 [[package]]
 name = "minijinja-utils"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "minijinja",
  "serde",
@@ -4877,7 +4852,7 @@ dependencies = [
  "mimalloc",
  "object_store",
  "rand 0.10.1",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "sse-stream",
@@ -4962,9 +4937,9 @@ dependencies = [
 
 [[package]]
 name = "napi"
-version = "3.8.5"
+version = "3.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa73b028610e2b26e9e40bd2c8ff8a98e6d7ed5d67d89ebf4bfd2f992616b024"
+checksum = "8e55037284865448ecf329baa86a4d05401f647ebde99f5747b640d32c2c5226"
 dependencies = [
  "bitflags",
  "ctor",
@@ -4984,9 +4959,9 @@ checksum = "d376940fd5b723c6893cd1ee3f33abbfd86acb1cd1ec079f3ab04a2a3bc4d3b1"
 
 [[package]]
 name = "napi-derive"
-version = "3.5.4"
+version = "3.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7430702d3cc05cf55f0a2c9e41d991c3b7a53f91e6146a8f282b1bfc7f3fd133"
+checksum = "a4ba740fe4c9524d86fd90798fd8ccdb23402b3eef7e7c30897a8a369b529fcf"
 dependencies = [
  "convert_case 0.11.0",
  "ctor",
@@ -4998,9 +4973,9 @@ dependencies = [
 
 [[package]]
 name = "napi-derive-backend"
-version = "5.0.3"
+version = "5.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ca5a083f2c9b49a0c7d33ec75c083498849c6fcc46f5497317faa39ea77f5d5"
+checksum = "0d5af30503edf933ce7377cf6d4c877a62b0f1107ea05585f1b5e430e88d5baf"
 dependencies = [
  "convert_case 0.11.0",
  "proc-macro2",
@@ -5613,12 +5588,12 @@ dependencies = [
 
 [[package]]
 name = "postgres-inference-load-test"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "clap",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "rlt",
  "serde",
  "serde_json",
@@ -5812,7 +5787,7 @@ dependencies = [
  "pin-project",
  "rand 0.10.1",
  "rcgen",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "reqwest-sse-stream",
  "rustls",
  "serde",
@@ -6232,7 +6207,7 @@ dependencies = [
 
 [[package]]
 name = "rate-limit-load-test"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6423,9 +6398,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.46.2"
+version = "0.46.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acb0c66c7b78c1da928bee668b5cc638c678642ff587faff6e6222f797be9d4c"
+checksum = "cb674900ca31acd75c4aaf63f48e43e719631c0539ea5a9e64163d1296bcb730"
 dependencies = [
  "ahash 0.8.12",
  "fluent-uri",
@@ -6527,9 +6502,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.13.2"
+version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab3f43e3283ab1488b624b44b0e988d0acea0b3214e694730a055cb6b2efa801"
+checksum = "62e0021ea2c22aed41653bc7e1419abb2c97e038ff2c33d0e1309e49a97deec0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -6573,13 +6548,13 @@ dependencies = [
 
 [[package]]
 name = "reqwest-sse-stream"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "async-stream",
  "futures",
  "http 1.4.0",
  "http-body 1.0.1",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "sse-stream",
  "thiserror 2.0.18",
 ]
@@ -6688,9 +6663,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "1.5.0"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67d69668de0b0ccd9cc435f700f3b39a7861863cf37a15e1f304ea78688a4826"
+checksum = "e12ca9067b5ebfbd5b3fcdc4acfceb81aa7d5ab2a879dff7cb75d22434276aad"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6703,7 +6678,7 @@ dependencies = [
  "pastey 0.2.1",
  "pin-project-lite",
  "rand 0.10.1",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "rmcp-macros",
  "schemars 1.2.1",
  "serde",
@@ -6720,9 +6695,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "1.5.0"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48fdc01c81097b0aed18633e676e269fefa3a78ec1df56b4fe597c1241b92025"
+checksum = "7caa6743cc0888e433105fe1bc551a7f607940b126a37bc97b478e86064627eb"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -6820,9 +6795,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.39"
+version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c2c118cb077cca2822033836dfb1b975355dfb784b5e8da48f7b6c5db74e60e"
+checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -7663,9 +7638,9 @@ dependencies = [
 
 [[package]]
 name = "sse-stream"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c5e6deb40826033bd7b11c7ef25ef71193fabd71f680f40dd16538a2704d2f4"
+checksum = "f3962b63f038885f15bce2c6e02c0e7925c072f1ac86bb60fd44c5c6b762fb72"
 dependencies = [
  "bytes",
  "futures-util",
@@ -7964,7 +7939,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -7973,7 +7948,7 @@ dependencies = [
  "mime 0.4.0-a.0",
  "paste",
  "pyo3",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "reqwest-sse-stream",
  "serde",
  "serde_json",
@@ -7992,12 +7967,14 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-auth"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "axum",
  "chrono",
  "futures",
+ "googletest",
  "hex",
+ "http 1.4.0",
  "moka",
  "rand 0.10.1",
  "secrecy",
@@ -8012,7 +7989,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-config-paths"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "googletest",
  "thiserror 2.0.18",
@@ -8022,7 +7999,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-core"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -8095,7 +8072,7 @@ dependencies = [
  "redis",
  "redis-test",
  "regex",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "reqwest-sse-stream",
  "rmcp",
  "rust_decimal",
@@ -8117,6 +8094,7 @@ dependencies = [
  "tensorzero-error",
  "tensorzero-http",
  "tensorzero-inference-types",
+ "tensorzero-overhead",
  "tensorzero-stored-config",
  "tensorzero-types",
  "tensorzero-types-providers",
@@ -8154,7 +8132,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-error"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "autopilot-client",
  "axum",
@@ -8166,6 +8144,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tensorzero-http",
  "tensorzero-types",
  "thiserror 2.0.18",
  "tracing",
@@ -8177,7 +8156,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-http"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "axum",
  "bytes",
@@ -8189,20 +8168,20 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-http",
  "pin-project",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "reqwest-sse-stream",
  "serde",
  "serde_json",
- "tensorzero-error",
- "tensorzero-types",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-futures",
+ "ts-rs",
 ]
 
 [[package]]
 name = "tensorzero-inference-types"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "async-trait",
  "derive_builder 0.20.2",
@@ -8235,7 +8214,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-mcp"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "async-trait",
  "autopilot-client",
@@ -8253,7 +8232,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-node"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "config-applier",
  "napi",
@@ -8268,7 +8247,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-optimizers"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -8282,7 +8261,7 @@ dependencies = [
  "object_store",
  "paste",
  "rand 0.10.1",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "schemars 1.2.1",
  "secrecy",
  "serde",
@@ -8305,8 +8284,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tensorzero-overhead"
+version = "2026.5.0"
+dependencies = [
+ "http 1.4.0",
+ "metrics",
+ "tensorzero-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tensorzero-python"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "evaluations",
  "futures",
@@ -8324,7 +8314,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-stored-config"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "futures",
  "googletest",
@@ -8341,11 +8331,11 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-ts-types"
-version = "2026.4.2"
+version = "2026.5.0"
 
 [[package]]
 name = "tensorzero-types"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8368,6 +8358,7 @@ dependencies = [
  "serde_path_to_error",
  "sqlx",
  "tensorzero-derive",
+ "tensorzero-http",
  "thiserror 2.0.18",
  "tracing",
  "ts-rs",
@@ -8377,7 +8368,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-types-providers"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -8388,7 +8379,7 @@ dependencies = [
 
 [[package]]
 name = "tensorzero-unsafe-helpers"
-version = "2026.4.2"
+version = "2026.5.0"
 
 [[package]]
 name = "termcolor"
@@ -8896,9 +8887,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-opentelemetry-instrumentation-sdk"
-version = "0.32.4"
+version = "0.32.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc2a7ad7b8bd011f482d1fdf95be20377cdd19f45aa9d1f9f902d746eddc3cad"
+checksum = "b8f2540011f6d5ac30e1fc9ff169573b4559406498ac27e0242549d9bf527ed1"
 dependencies = [
  "http 1.4.0",
  "opentelemetry",
@@ -8961,7 +8952,7 @@ dependencies = [
 
 [[package]]
 name = "ts-executor-pool"
-version = "2026.4.2"
+version = "2026.5.0"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",

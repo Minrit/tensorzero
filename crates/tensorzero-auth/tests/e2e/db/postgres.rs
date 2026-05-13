@@ -6,7 +6,9 @@ use sqlx::PgPool;
 
 use tensorzero_auth::{
     key::{TensorZeroApiKey, TensorZeroAuthError},
-    postgres::{AuthResult, KeyInfo, check_key, create_key, disable_key, list_key_info},
+    postgres::{
+        AuthResult, KeyInfo, check_key, create_key, disable_key, get_key_info, list_key_info,
+    },
 };
 
 #[sqlx::test]
@@ -54,7 +56,7 @@ async fn test_key_lifecycle(pool: PgPool) {
         panic!("Key should be missing: {missing_key_res:?}");
     };
 
-    let list_keys_res = list_key_info(None, None, None, &pool).await.unwrap();
+    let list_keys_res = list_key_info(None, None, None, None, &pool).await.unwrap();
     assert_eq!(
         list_keys_res,
         vec![second_key_info.clone(), first_key_info.clone()]
@@ -84,7 +86,7 @@ async fn test_key_lifecycle(pool: PgPool) {
     assert_eq!(key_info.disabled_at, None);
 
     // Check that the first key shows up as disabled in 'list_key_info'
-    let new_list_keys_res = list_key_info(None, None, None, &pool).await.unwrap();
+    let new_list_keys_res = list_key_info(None, None, None, None, &pool).await.unwrap();
     let disabled_first_key = KeyInfo {
         public_id: first_key_info.public_id,
         organization: first_key_info.organization,
@@ -181,7 +183,7 @@ async fn test_list_keys(pool: PgPool) {
     );
 
     assert_eq!(
-        list_key_info(None, None, None, &pool).await.unwrap(),
+        list_key_info(None, None, None, None, &pool).await.unwrap(),
         vec![
             collide_workspace_name_info.clone(),
             different_org_info.clone(),
@@ -192,7 +194,9 @@ async fn test_list_keys(pool: PgPool) {
     );
 
     assert_eq!(
-        list_key_info(None, Some(3), None, &pool).await.unwrap(),
+        list_key_info(None, None, Some(3), None, &pool)
+            .await
+            .unwrap(),
         vec![
             collide_workspace_name_info.clone(),
             different_org_info.clone(),
@@ -201,7 +205,9 @@ async fn test_list_keys(pool: PgPool) {
     );
 
     assert_eq!(
-        list_key_info(None, None, Some(1), &pool).await.unwrap(),
+        list_key_info(None, None, None, Some(1), &pool)
+            .await
+            .unwrap(),
         vec![
             different_org_info.clone(),
             same_org_different_workspace_info.clone(),
@@ -211,7 +217,9 @@ async fn test_list_keys(pool: PgPool) {
     );
 
     assert_eq!(
-        list_key_info(None, Some(3), Some(1), &pool).await.unwrap(),
+        list_key_info(None, None, Some(3), Some(1), &pool)
+            .await
+            .unwrap(),
         vec![
             different_org_info.clone(),
             same_org_different_workspace_info.clone(),
@@ -220,7 +228,7 @@ async fn test_list_keys(pool: PgPool) {
     );
 
     assert_eq!(
-        list_key_info(Some("my_org".to_string()), None, None, &pool)
+        list_key_info(Some("my_org".to_string()), None, None, None, &pool)
             .await
             .unwrap(),
         vec![
@@ -231,7 +239,7 @@ async fn test_list_keys(pool: PgPool) {
     );
 
     assert_eq!(
-        list_key_info(Some("different_org".to_string()), None, None, &pool)
+        list_key_info(Some("different_org".to_string()), None, None, None, &pool)
             .await
             .unwrap(),
         vec![
@@ -241,10 +249,75 @@ async fn test_list_keys(pool: PgPool) {
     );
 
     assert_eq!(
-        list_key_info(Some("missing_org".to_string()), None, None, &pool)
+        list_key_info(Some("missing_org".to_string()), None, None, None, &pool)
             .await
             .unwrap(),
         vec![]
+    );
+
+    assert_eq!(
+        list_key_info(
+            Some("my_org".to_string()),
+            Some("my_workspace".to_string()),
+            None,
+            None,
+            &pool
+        )
+        .await
+        .unwrap(),
+        vec![second_key_info.clone(), first_key_info.clone()]
+    );
+
+    assert_eq!(
+        list_key_info(
+            Some("my_org".to_string()),
+            Some("my_second_workspace".to_string()),
+            None,
+            None,
+            &pool
+        )
+        .await
+        .unwrap(),
+        vec![same_org_different_workspace_info.clone()]
+    );
+
+    assert_eq!(
+        list_key_info(
+            Some("different_org".to_string()),
+            Some("my_workspace".to_string()),
+            None,
+            None,
+            &pool
+        )
+        .await
+        .unwrap(),
+        vec![collide_workspace_name_info.clone()]
+    );
+
+    assert_eq!(
+        list_key_info(
+            Some("my_org".to_string()),
+            Some("different_workspace".to_string()),
+            None,
+            None,
+            &pool
+        )
+        .await
+        .unwrap(),
+        vec![]
+    );
+
+    // Setting a workspace filter without an organization filter is an error,
+    // since workspace names are not unique across organizations.
+    let err = list_key_info(None, Some("my_workspace".to_string()), None, None, &pool)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            TensorZeroAuthError::WorkspaceFilterRequiresOrganization
+        ),
+        "Expected `WorkspaceFilterRequiresOrganization`, got: {err:?}"
     );
 }
 
@@ -298,7 +371,7 @@ async fn test_disable_key_workflow(pool: PgPool) {
     let parsed_key = TensorZeroApiKey::parse(api_key.expose_secret()).unwrap();
 
     // Use list_key_info to get information about the key
-    let key_list = list_key_info(None, None, None, &pool).await.unwrap();
+    let key_list = list_key_info(None, None, None, None, &pool).await.unwrap();
     assert_eq!(key_list.len(), 1);
     let key_info = &key_list[0];
     assert_eq!(key_info.organization, "test_org");
@@ -311,7 +384,7 @@ async fn test_disable_key_workflow(pool: PgPool) {
     let now = Utc::now();
 
     // Run list_key_info again and verify the key shows as disabled
-    let key_list_after_disable = list_key_info(None, None, None, &pool).await.unwrap();
+    let key_list_after_disable = list_key_info(None, None, None, None, &pool).await.unwrap();
     assert_eq!(key_list_after_disable.len(), 1);
     let disabled_key_info = &key_list_after_disable[0];
     assert_eq!(disabled_key_info.public_id, key_info.public_id);
@@ -334,6 +407,28 @@ async fn test_disable_key_workflow(pool: PgPool) {
         check_disabled_at, disabled_at,
         "Timestamps should match between list_key_info and check_key"
     );
+}
+
+#[sqlx::test]
+async fn test_get_key_info(pool: PgPool) {
+    let api_key = create_key("test_org", "test_workspace", Some("Test key"), None, &pool)
+        .await
+        .unwrap();
+    let parsed_key = TensorZeroApiKey::parse(api_key.expose_secret()).unwrap();
+
+    let info = get_key_info(&parsed_key.public_id, &pool)
+        .await
+        .unwrap()
+        .expect("key should exist");
+    assert_eq!(info.public_id, parsed_key.public_id);
+    assert_eq!(info.organization, "test_org");
+    assert_eq!(info.workspace, "test_workspace");
+    assert_eq!(info.description, Some("Test key".to_string()));
+    assert_eq!(info.disabled_at, None);
+    assert_eq!(info.expires_at, None);
+
+    let missing = get_key_info("aaaaaaaaaaaa", &pool).await.unwrap();
+    assert!(missing.is_none(), "missing key should return None");
 }
 
 #[sqlx::test]

@@ -858,27 +858,27 @@ fn collect_dashscope_choice_array(values: &[Value], data: &mut Vec<Value>) {
 }
 
 fn collect_dashscope_image_object(value: &Value, data: &mut Vec<Value>) {
-        let Some(object) = value.as_object() else {
+    let Some(object) = value.as_object() else {
         return;
-        };
-        if let Some(encoded) = object
-            .get("b64_json")
-            .or_else(|| object.get("base64"))
-            .or_else(|| object.get("image_base64"))
-            .and_then(Value::as_str)
-        {
-            data.push(serde_json::json!({ "b64_json": encoded }));
+    };
+    if let Some(encoded) = object
+        .get("b64_json")
+        .or_else(|| object.get("base64"))
+        .or_else(|| object.get("image_base64"))
+        .and_then(Value::as_str)
+    {
+        data.push(serde_json::json!({ "b64_json": encoded }));
         return;
-        }
-        if let Some(url) = object
-            .get("url")
-            .or_else(|| object.get("image_url"))
-            .or_else(|| object.get("imageUrl"))
-            .or_else(|| object.get("image"))
-            .and_then(Value::as_str)
-        {
-            data.push(serde_json::json!({ "url": url }));
-        }
+    }
+    if let Some(url) = object
+        .get("url")
+        .or_else(|| object.get("image_url"))
+        .or_else(|| object.get("imageUrl"))
+        .or_else(|| object.get("image"))
+        .and_then(Value::as_str)
+    {
+        data.push(serde_json::json!({ "url": url }));
+    }
 }
 
 fn dashscope_task_error(response_json: &Value, raw_response: String, provider_type: &str) -> Error {

@@ -93,7 +93,7 @@ futures-core = "0.3.30"
 hex = "0.4.3"
 itertools = "0.14.0"
 json-pointer = { workspace = true }
-jsonschema = "0.46.2"
+jsonschema = "0.46.3"
 jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 lazy_static = { workspace = true }
 metrics = "0.24.3"
@@ -129,6 +129,7 @@ tensorzero-stored-config = { path = "../tensorzero-stored-config" }
 tensorzero-types = { path = "../tensorzero-types" }
 tensorzero-error = { path = "../tensorzero-error", default-features = false }
 tensorzero-http = { path = "../tensorzero-http" }
+tensorzero-overhead = { path = "../tensorzero-overhead" }
 tensorzero-config-paths = { path = "../tensorzero-config-paths" }
 tensorzero-types-providers = { path = "../tensorzero-types-providers" }
 minijinja-utils = { path = "../minijinja-utils" }
@@ -142,7 +143,7 @@ opentelemetry-otlp = { version = "0.31.1", optional = true, features = [
     "tls-roots",
 ] }
 opentelemetry-semantic-conventions = "0.31.0"
-init-tracing-opentelemetry = { version = "0.36.1", features = ["xray"] }
+init-tracing-opentelemetry = { version = "0.37.0", features = ["xray"] }
 tracing-futures = { version = "0.2.5", features = ["futures-03"] }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = [
     "http",
@@ -198,7 +199,7 @@ log = "0.4.29"
 mockall = "0.14"
 tensorzero-unsafe-helpers = { path = "../tensorzero-unsafe-helpers" }
 redis-test = { workspace = true }
-rmcp = { version = "1.5.0", features = ["client", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "1.6.0", features = ["client", "transport-streamable-http-client-reqwest"] }
 
 [build-dependencies]
 built = "0.8.0"
