@@ -1,0 +1,32 @@
+[gateway]
+bind_address = "127.0.0.1:39100"
+observability.enabled = true
+observability.backend = "clickhouse"
+observability.async_writes = false
+
+[gateway.observability.batch_writes]
+enabled = true
+write_queue_capacity = 10000
+flush_interval_ms = 100
+max_rows = 1000
+
+[models."gpt-4.1-mini"]
+routing = ["openai"]
+
+[models."gpt-4.1-mini".providers.openai]
+type = "openai"
+model_name = "gpt-4.1-mini"
+api_base = "http://localhost:39130/openai/"
+api_key_location = "none"
+
+[functions.function1]
+type = "chat"
+
+[functions.function1.experimentation]
+type = "static"
+candidate_variants = { "variant1" = 1.0 }
+
+[functions.function1.variants.variant1]
+type = "chat_completion"
+model = "gpt-4.1-mini"
+max_tokens = 100

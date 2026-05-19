@@ -196,6 +196,7 @@ http-body-util = { workspace = true }
 image = "0.25.10"
 gag = "1.0.0"
 log = "0.4.29"
+metrics-util = "0.20.1"
 mockall = "0.14"
 tensorzero-unsafe-helpers = { path = "../tensorzero-unsafe-helpers" }
 redis-test = { workspace = true }

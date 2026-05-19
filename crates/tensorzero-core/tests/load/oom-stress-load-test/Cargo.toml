@@ -1,0 +1,10 @@
+[package]
+name = "oom-stress-load-test"
+version.workspace = true
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }

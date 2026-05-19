@@ -1,3 +1,4 @@
+use googletest::prelude::*;
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -8,6 +9,31 @@ use crate::common::get_gateway_endpoint;
 /// This file is used to test the Prometheus metrics endpoint of the gateway.
 ///
 /// Namely, it tests that `tensorzero_requests_total` is incremented correctly for inference and feedback requests.
+
+#[gtest]
+#[tokio::test]
+async fn test_prometheus_metrics_batch_write_drop_counter_registered() {
+    let client = Client::new();
+    let body = client
+        .get(get_gateway_endpoint("/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    expect_that!(
+        body,
+        contains_substring(
+            "# HELP tensorzero_batch_write_dropped_total ClickHouse observability batch-write rows dropped due to bounded queue pressure or writer shutdown."
+        )
+    );
+    expect_that!(
+        body,
+        contains_substring("# TYPE tensorzero_batch_write_dropped_total counter")
+    );
+}
 
 #[tokio::test]
 async fn test_prometheus_metrics_inference_nonstreaming() {

@@ -1302,6 +1302,12 @@ pub fn setup_metrics(metrics_config: Option<&MetricsConfig>) -> Result<Prometheu
         "Output tokens consumed by TensorZero inferences",
     );
 
+    describe_counter!(
+        "tensorzero_batch_write_dropped_total",
+        Unit::Count,
+        "ClickHouse observability batch-write rows dropped due to bounded queue pressure or writer shutdown.",
+    );
+
     if !buckets.is_empty() {
         describe_histogram!(
             "tensorzero_inference_latency_overhead_seconds",
