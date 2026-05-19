@@ -157,10 +157,10 @@ impl OpenAIProvider {
                         .to_string(),
             }));
         }
-        if let Some(api_base) = &api_base {
-            if let Some(url) = api_base.as_static() {
-                check_api_base_suffix(url);
-            }
+        if let Some(api_base) = &api_base
+            && let Some(url) = api_base.as_static()
+        {
+            check_api_base_suffix(url);
         }
 
         if !provider_tools.is_empty() && !matches!(api_type, OpenAIAPIType::Responses) {

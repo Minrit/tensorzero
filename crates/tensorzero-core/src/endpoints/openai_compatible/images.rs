@@ -399,10 +399,10 @@ fn validate_provider_api_base(url: &Url) -> Result<(), Error> {
     {
         return invalid_base_url("provider_api_base host is not allowed");
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(ip) {
-            return invalid_base_url("provider_api_base IP address is not allowed");
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_blocked_ip(ip)
+    {
+        return invalid_base_url("provider_api_base IP address is not allowed");
     }
     Ok(())
 }
@@ -448,7 +448,10 @@ fn provider_image_error(
         Some(mode) => format!(
             "{IMAGE_CALL_MODE_MISMATCH_MARKER}: attempted_call_mode={mode}; provider returned that this API does not support the attempted image call mode"
         ),
-        None => raw_response.to_string(),
+        None => format!(
+            "Image provider request failed with status {}",
+            status.as_u16()
+        ),
     };
     let message = match request_id {
         Some(id) => format!("{message} [request_id: {id}]"),
@@ -760,18 +763,18 @@ fn normalize_gemini_generate_content_response(
         .and_then(Value::as_array)
     {
         for part in parts {
-            if let Some(inline_data) = part.get("inlineData").or_else(|| part.get("inline_data")) {
-                if let Some(encoded) = inline_data.get("data").and_then(Value::as_str) {
-                    let mime_type = inline_data
-                        .get("mimeType")
-                        .or_else(|| inline_data.get("mime_type"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("image/png");
-                    data.push(serde_json::json!({
-                        "b64_json": encoded,
-                        "mime_type": mime_type,
-                    }));
-                }
+            if let Some(inline_data) = part.get("inlineData").or_else(|| part.get("inline_data"))
+                && let Some(encoded) = inline_data.get("data").and_then(Value::as_str)
+            {
+                let mime_type = inline_data
+                    .get("mimeType")
+                    .or_else(|| inline_data.get("mime_type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png");
+                data.push(serde_json::json!({
+                    "b64_json": encoded,
+                    "mime_type": mime_type,
+                }));
             }
         }
     }
@@ -968,6 +971,9 @@ fn size_to_aspect_ratio(size: Option<&str>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use googletest::prelude::*;
+
+    const IMAGE_ERROR_BODY_BOUND_BYTES: usize = 64 * 1024;
 
     fn image_params(provider_type: &str, family: &str) -> OpenAICompatibleImageGenerationParams {
         serde_json::from_value(serde_json::json!({
@@ -983,6 +989,10 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    fn large_image_data() -> String {
+        "a".repeat(1024 * 1024)
     }
 
     fn dashscope_image_params_with_contract(
@@ -1320,5 +1330,123 @@ mod tests {
             error.get_details(),
             ErrorDetails::InferenceClient { .. }
         ));
+    }
+
+    #[gtest]
+    fn image_relay_error_truncation_peels_b64_json() {
+        let raw_response = serde_json::json!({
+            "data": [{ "b64_json": large_image_data() }],
+            "model": "gpt-image-1"
+        })
+        .to_string();
+        let error = Error::new(ErrorDetails::InferenceServer {
+            message: "provider returned invalid image data".to_string(),
+            provider_type: "openai".to_string(),
+            api_type: ApiType::Images,
+            raw_request: None,
+            raw_response: Some(raw_response),
+        });
+
+        let ErrorDetails::InferenceServer {
+            raw_response: Some(raw_response),
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected InferenceServer details");
+        };
+
+        expect_that!(raw_response.len(), le(IMAGE_ERROR_BODY_BOUND_BYTES));
+        let value: Value = serde_json::from_str(raw_response)
+            .unwrap_or_else(|e| panic!("peeled image relay error should be JSON: {e}"));
+        expect_that!(
+            value["data"][0]["b64_json"].as_str(),
+            some(eq("<image:1048576 bytes>"))
+        );
+        expect_that!(value["model"].as_str(), some(eq("gpt-image-1")));
+    }
+
+    #[gtest]
+    fn image_relay_error_truncation_peels_gemini_inline_data() {
+        let raw_response = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "image/png",
+                            "data": large_image_data()
+                        }
+                    }]
+                }
+            }]
+        })
+        .to_string();
+        let error = Error::new(ErrorDetails::InferenceServer {
+            message: "provider returned invalid image data".to_string(),
+            provider_type: "gemini".to_string(),
+            api_type: ApiType::Images,
+            raw_request: None,
+            raw_response: Some(raw_response),
+        });
+
+        let ErrorDetails::InferenceServer {
+            raw_response: Some(raw_response),
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected InferenceServer details");
+        };
+
+        expect_that!(raw_response.len(), le(IMAGE_ERROR_BODY_BOUND_BYTES));
+        let value: Value = serde_json::from_str(raw_response)
+            .unwrap_or_else(|e| panic!("peeled Gemini error should be JSON: {e}"));
+        let inline_data = &value["candidates"][0]["content"]["parts"][0]["inlineData"];
+        expect_that!(
+            inline_data["data"].as_str(),
+            some(eq("<image:1048576 bytes>"))
+        );
+        expect_that!(inline_data["mimeType"].as_str(), some(eq("image/png")));
+    }
+
+    #[gtest]
+    fn provider_image_error_keeps_message_and_raw_response_bounded() {
+        let raw_response = serde_json::json!({
+            "error": {
+                "message": "image quota exceeded",
+                "code": "insufficient_quota"
+            },
+            "data": [{ "b64_json": large_image_data() }]
+        })
+        .to_string();
+        let error = provider_image_error(
+            StatusCode::BAD_REQUEST,
+            "{}",
+            &raw_response,
+            Some("req_123"),
+            "openai",
+        );
+
+        let ErrorDetails::InferenceClient {
+            message,
+            raw_response: Some(raw_response),
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected InferenceClient details");
+        };
+
+        expect_that!(message.len(), le(IMAGE_ERROR_BODY_BOUND_BYTES));
+        expect_that!(message.as_str(), contains_substring("400"));
+        expect_that!(message.as_str(), contains_substring("req_123"));
+        expect_that!(raw_response.len(), le(IMAGE_ERROR_BODY_BOUND_BYTES));
+        let value: Value = serde_json::from_str(raw_response)
+            .unwrap_or_else(|e| panic!("peeled provider error should be JSON: {e}"));
+        expect_that!(
+            value["error"]["message"].as_str(),
+            some(eq("image quota exceeded"))
+        );
+        expect_that!(
+            value["data"][0]["b64_json"].as_str(),
+            some(eq("<image:1048576 bytes>"))
+        );
     }
 }

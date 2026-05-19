@@ -148,7 +148,7 @@ impl AnthropicProvider {
                 check_api_base_suffix(&url);
                 super::helpers::DynamicApiBase::Static(normalize_api_base(url))
             }
-            dynamic => dynamic,
+            dynamic @ super::helpers::DynamicApiBase::Dynamic(_) => dynamic,
         });
 
         AnthropicProvider {

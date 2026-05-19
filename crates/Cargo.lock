@@ -8136,6 +8136,7 @@ version = "2026.5.0"
 dependencies = [
  "autopilot-client",
  "axum",
+ "googletest",
  "http 1.4.0",
  "indexmap 2.14.0",
  "minijinja-utils",

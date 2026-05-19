@@ -330,6 +330,10 @@ fn generate_bundle(root_type: &str, file_map: &HashMap<&str, &TsFile>) -> String
 /// Each bundle is written to a separate `.ts` file (with `export {}` to make it a module
 /// and prevent cross-file type conflicts). If `tsc` is not found in PATH, a warning is
 /// emitted and validation is skipped.
+#[expect(
+    dead_code,
+    reason = "TSC validation hook is kept for opt-in build checks"
+)]
 fn validate_bundles_with_tsc(out_dir: &Path, bundles: &[(String, String)]) {
     let tsc_dir = out_dir.join("tsc_check");
     let _ = fs::remove_dir_all(&tsc_dir);

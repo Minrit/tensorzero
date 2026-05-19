@@ -27,6 +27,7 @@ use tensorzero_types::{ApiType, RawResponseEntry, SnapshotHash, StoragePath, Tho
 use tensorzero_types::rate_limiting_types::{FailedRateLimit, RateLimitingConfigScopes};
 
 pub mod delayed_error;
+mod raw_response;
 pub use delayed_error::DelayedError;
 
 struct LpProviderErrorFacts<'a> {
@@ -183,6 +184,7 @@ fn opt_capture_backtrace() -> Option<Arc<Backtrace>> {
 
 impl Error {
     pub fn new(details: ErrorDetails) -> Self {
+        let details = normalize_raw_fields(details);
         let err = Self {
             details: Arc::new(details),
             #[cfg(feature = "e2e_tests")]
@@ -195,6 +197,7 @@ impl Error {
     // If you need to construct an error without logging it, use `DelayedError` instead.
     // This method should only be called within `DelayedError` itself.
     fn new_without_logging(details: ErrorDetails) -> Self {
+        let details = normalize_raw_fields(details);
         Self {
             details: Arc::new(details),
             #[cfg(feature = "e2e_tests")]
@@ -1572,6 +1575,70 @@ impl ErrorDetails {
     }
 }
 
+fn normalize_raw_fields(details: ErrorDetails) -> ErrorDetails {
+    match details {
+        ErrorDetails::InferenceClient {
+            message,
+            status_code,
+            provider_type,
+            api_type,
+            raw_request,
+            raw_response,
+        } => ErrorDetails::InferenceClient {
+            message: raw_response::truncate_raw_string(message),
+            status_code,
+            provider_type,
+            api_type,
+            raw_request: raw_response::truncate_raw(raw_request),
+            raw_response: raw_response::truncate_raw(raw_response),
+        },
+        ErrorDetails::FatalStreamError {
+            message,
+            status_code,
+            provider_type,
+            api_type,
+            raw_request,
+            raw_response,
+        } => ErrorDetails::FatalStreamError {
+            message: raw_response::truncate_raw_string(message),
+            status_code,
+            provider_type,
+            api_type,
+            raw_request: raw_response::truncate_raw(raw_request),
+            raw_response: raw_response::truncate_raw(raw_response),
+        },
+        ErrorDetails::InferenceServer {
+            message,
+            provider_type,
+            api_type,
+            raw_request,
+            raw_response,
+        } => ErrorDetails::InferenceServer {
+            message: raw_response::truncate_raw_string(message),
+            provider_type,
+            api_type,
+            raw_request: raw_response::truncate_raw(raw_request),
+            raw_response: raw_response::truncate_raw(raw_response),
+        },
+        ErrorDetails::Relay {
+            message,
+            raw_response,
+            raw_chunk,
+            status_code,
+        } => ErrorDetails::Relay {
+            message: raw_response::truncate_raw_string(message),
+            raw_response: raw_response::truncate_raw_entries(raw_response),
+            raw_chunk: raw_response::truncate_raw(raw_chunk),
+            status_code,
+        },
+        ErrorDetails::StreamError { source, raw_event } => ErrorDetails::StreamError {
+            source,
+            raw_event: raw_response::truncate_raw(raw_event),
+        },
+        details => details,
+    }
+}
+
 impl std::fmt::Display for ErrorDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2446,6 +2513,30 @@ impl From<tensorzero_types::TypeError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use googletest::prelude::*;
+
+    fn image_response_json() -> String {
+        serde_json::json!({
+            "data": [{ "b64_json": "a".repeat(1024 * 1024) }],
+            "model": "gpt-image-1"
+        })
+        .to_string()
+    }
+
+    fn deepseek_error_json() -> String {
+        r#"{"error":{"message":"insufficient_quota","code":"insufficient_quota"}}"#.to_string()
+    }
+
+    fn inference_client_error(raw_response: Option<String>) -> Error {
+        Error::new(ErrorDetails::InferenceClient {
+            message: "bad request".to_string(),
+            status_code: Some(StatusCode::BAD_REQUEST),
+            provider_type: "openai".to_string(),
+            api_type: ApiType::Images,
+            raw_request: None,
+            raw_response,
+        })
+    }
 
     #[test]
     fn test_extract_from_inference_client() {
@@ -2963,5 +3054,275 @@ mod tests {
         let entries = entries.unwrap();
         assert_eq!(entries.len(), 1, "should have exactly one entry");
         assert_eq!(entries[0].data, "stream_error_data");
+    }
+
+    #[gtest]
+    fn test_inference_client_raw_response_is_bounded() {
+        let error = inference_client_error(Some(image_response_json()));
+
+        let ErrorDetails::InferenceClient {
+            raw_response: Some(raw_response),
+            message,
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected InferenceClient details");
+        };
+
+        expect_that!(
+            raw_response.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+        expect_that!(message.as_str(), eq("bad request"));
+        expect_that!(raw_response, contains_substring("<image:1048576 bytes>"));
+    }
+
+    #[gtest]
+    fn test_inference_server_raw_response_is_bounded() {
+        let error = Error::new(ErrorDetails::InferenceServer {
+            message: "server error".to_string(),
+            provider_type: "openai".to_string(),
+            api_type: ApiType::Images,
+            raw_request: None,
+            raw_response: Some(image_response_json()),
+        });
+
+        let ErrorDetails::InferenceServer {
+            raw_response: Some(raw_response),
+            message,
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected InferenceServer details");
+        };
+
+        expect_that!(
+            raw_response.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+        expect_that!(message.as_str(), eq("server error"));
+    }
+
+    #[gtest]
+    fn test_fatal_stream_error_raw_response_is_bounded() {
+        let error = Error::new(ErrorDetails::FatalStreamError {
+            message: "stream failed".to_string(),
+            status_code: None,
+            provider_type: "openai".to_string(),
+            api_type: ApiType::Images,
+            raw_request: None,
+            raw_response: Some(image_response_json()),
+        });
+
+        let ErrorDetails::FatalStreamError {
+            raw_response: Some(raw_response),
+            message,
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected FatalStreamError details");
+        };
+
+        expect_that!(
+            raw_response.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+        expect_that!(message.as_str(), eq("stream failed"));
+    }
+
+    #[gtest]
+    fn test_raw_request_is_bounded() {
+        let error = Error::new(ErrorDetails::InferenceClient {
+            message: "bad request".to_string(),
+            status_code: Some(StatusCode::BAD_REQUEST),
+            provider_type: "openai".to_string(),
+            api_type: ApiType::Images,
+            raw_request: Some(image_response_json()),
+            raw_response: None,
+        });
+
+        let ErrorDetails::InferenceClient {
+            raw_request: Some(raw_request),
+            raw_response,
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected InferenceClient details");
+        };
+
+        expect_that!(
+            raw_request.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+        expect_that!(raw_response, none());
+    }
+
+    #[gtest]
+    fn test_message_is_bounded() {
+        let error = Error::new(ErrorDetails::InferenceClient {
+            message: image_response_json(),
+            status_code: Some(StatusCode::BAD_REQUEST),
+            provider_type: "openai".to_string(),
+            api_type: ApiType::Images,
+            raw_request: None,
+            raw_response: None,
+        });
+
+        let ErrorDetails::InferenceClient { message, .. } = error.get_details() else {
+            panic!("expected InferenceClient details");
+        };
+
+        expect_that!(
+            message.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+    }
+
+    #[gtest]
+    fn test_small_raw_response_is_preserved_verbatim() {
+        let raw_response = deepseek_error_json();
+        let error = inference_client_error(Some(raw_response.clone()));
+
+        let ErrorDetails::InferenceClient {
+            raw_response: Some(normalized),
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected InferenceClient details");
+        };
+
+        expect_that!(normalized, eq(&raw_response));
+    }
+
+    #[gtest]
+    fn test_none_raw_response_remains_none_after_normalization() {
+        let error = inference_client_error(None);
+
+        let ErrorDetails::InferenceClient { raw_response, .. } = error.get_details() else {
+            panic!("expected InferenceClient details");
+        };
+
+        expect_that!(raw_response, none());
+    }
+
+    #[gtest]
+    fn test_other_error_variants_are_untouched() {
+        let error = Error::new(ErrorDetails::InvalidRequest {
+            message: "x".to_string(),
+        });
+
+        assert!(matches!(
+            error.get_details(),
+            ErrorDetails::InvalidRequest { message } if message == "x"
+        ));
+    }
+
+    #[gtest]
+    fn test_aggregate_raw_response_fanout_stays_bounded() {
+        let leaf = inference_client_error(Some(image_response_json()));
+        let error = Error::new(ErrorDetails::AllRetriesFailed {
+            errors: vec![leaf; 5],
+        });
+
+        let entries = error
+            .extract_raw_response()
+            .expect("aggregate should expose raw response entries");
+        let total_len: usize = entries.iter().map(|entry| entry.data.len()).sum();
+
+        expect_that!(
+            total_len,
+            le(5 * raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+    }
+
+    #[gtest]
+    fn test_delayed_error_path_normalizes_raw_response() {
+        let delayed = DelayedError::new(ErrorDetails::InferenceClient {
+            message: "bad request".to_string(),
+            status_code: Some(StatusCode::BAD_REQUEST),
+            provider_type: "openai".to_string(),
+            api_type: ApiType::Images,
+            raw_request: None,
+            raw_response: Some(image_response_json()),
+        });
+
+        let ErrorDetails::InferenceClient {
+            raw_response: Some(raw_response),
+            ..
+        } = delayed.get_details()
+        else {
+            panic!("expected InferenceClient details");
+        };
+
+        expect_that!(
+            raw_response.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+    }
+
+    #[gtest]
+    fn test_relay_raw_fields_are_bounded() {
+        let error = Error::new(ErrorDetails::Relay {
+            message: image_response_json(),
+            raw_response: vec![RawResponseEntry {
+                model_inference_id: None,
+                provider_type: "openai".to_string(),
+                api_type: ApiType::Images,
+                data: image_response_json(),
+            }],
+            raw_chunk: Some(image_response_json()),
+            status_code: Some(StatusCode::BAD_GATEWAY),
+        });
+
+        let ErrorDetails::Relay {
+            message,
+            raw_response: entries,
+            raw_chunk: Some(raw_chunk),
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected Relay details");
+        };
+
+        expect_that!(
+            message.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+        expect_that!(
+            entries[0].data.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+        expect_that!(
+            raw_chunk.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
+    }
+
+    #[gtest]
+    fn test_stream_error_raw_event_is_bounded() {
+        let source = Error::new(ErrorDetails::InferenceServer {
+            message: "inner".to_string(),
+            provider_type: "openai".to_string(),
+            api_type: ApiType::Images,
+            raw_request: None,
+            raw_response: None,
+        });
+        let error = Error::new(ErrorDetails::StreamError {
+            source: Box::new(source),
+            raw_event: Some(image_response_json()),
+        });
+
+        let ErrorDetails::StreamError {
+            raw_event: Some(raw_event),
+            ..
+        } = error.get_details()
+        else {
+            panic!("expected StreamError details");
+        };
+
+        expect_that!(
+            raw_event.len(),
+            le(raw_response::RAW_RESPONSE_TRUNCATION_BYTES)
+        );
     }
 }

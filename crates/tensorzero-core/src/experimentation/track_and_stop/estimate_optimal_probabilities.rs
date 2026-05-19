@@ -403,7 +403,10 @@ mod tests {
     // Helper to extract probabilities in variant order
     fn hashmap_to_vec(map: &HashMap<String, f64>, num_variants: usize) -> Vec<f64> {
         (0..num_variants)
-            .map(|i| *map.get(&format!("variant_{i}")).unwrap())
+            .map(|i| {
+                let key = format!("variant_{i}");
+                map[&key]
+            })
             .collect()
     }
 

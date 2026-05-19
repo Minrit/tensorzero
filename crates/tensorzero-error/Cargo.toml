@@ -36,5 +36,8 @@ redis = ["dep:redis"]
 autopilot-client = ["dep:autopilot-client"]
 e2e_tests = []
 
+[dev-dependencies]
+googletest = { workspace = true }
+
 [lints]
 workspace = true
