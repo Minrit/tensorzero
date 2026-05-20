@@ -2595,33 +2595,125 @@ pub async fn tensorzero_to_gcp_vertex_gemini_content<'a>(
     Ok(message)
 }
 
-/// Recursively removes fields unsupported by Google's Schema spec
-/// (`$schema`, `additionalProperties`, bare `ref`) from JSON schemas.
+/// Fields permitted by Google's `Schema` proto (an OpenAPI 3.0 subset) for
+/// tool `function_declarations` parameters and structured-output
+/// `responseSchema`. Everything else is dropped during conformance.
+///
+/// Gemini rejects the request with a hard 400 at the API boundary when a
+/// schema carries an unknown field, an array-valued `type` (the proto's
+/// `type` is a singular enum, not repeated), or a JSON-Schema composition
+/// keyword it does not model (`oneOf` / `allOf` / `not` / `const` / `$ref`).
+/// `anyOf` IS modelled by the proto and is therefore retained (and recursed
+/// into); the others are not.
+const GEMINI_SCHEMA_ALLOWED_FIELDS: &[&str] = &[
+    "type",
+    "format",
+    "title",
+    "description",
+    "nullable",
+    "default",
+    "items",
+    "minItems",
+    "maxItems",
+    "enum",
+    "properties",
+    "propertyOrdering",
+    "required",
+    "minProperties",
+    "maxProperties",
+    "minimum",
+    "maximum",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "example",
+    "anyOf",
+];
+
+/// Conforms a standard JSON Schema to Google's `Schema` proto (OpenAPI 3.0
+/// subset) so Gemini accepts it as a tool parameter / response schema.
+///
+/// Three transforms, applied recursively at every schema node:
+/// 1. Collapse an array-valued `type` (e.g. `["string", "null"]`) to a single
+///    string type plus `nullable: true` when `"null"` was a member. A union of
+///    multiple non-null types keeps the first deterministically (the proto
+///    cannot express the union).
+/// 2. Drop every field outside [`GEMINI_SCHEMA_ALLOWED_FIELDS`]. This is a
+///    superset of the previous behavior (which only removed
+///    `additionalProperties` / `$schema` / bare `ref`) and also removes
+///    `oneOf` / `allOf` / `not` / `const` / `$ref` / `definitions` /
+///    `patternProperties` and any other non-proto keyword.
+/// 3. Recurse into the sub-schema-bearing fields only — `properties` values,
+///    `items`, and `anyOf` members — so the allowlist is never applied to the
+///    arbitrary keys of a `properties` map or to `default` / `example` data.
 pub(crate) fn process_jsonschema_for_gcp_vertex_gemini(schema: &Value) -> Value {
     let mut schema = schema.clone();
+    conform_schema_node(&mut schema);
+    schema
+}
 
-    fn remove_properties(value: &mut Value) {
-        match value {
-            Value::Object(obj) => {
-                obj.remove("additionalProperties");
-                obj.remove("$schema");
-                // Bare "ref" (without $) is not a valid Google Schema field
-                obj.remove("ref");
-                for (_, v) in obj.iter_mut() {
-                    remove_properties(v);
+fn conform_schema_node(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            collapse_type_union(obj);
+            obj.retain(|key, _| GEMINI_SCHEMA_ALLOWED_FIELDS.contains(&key.as_str()));
+
+            if let Some(properties) = obj.get_mut("properties").and_then(Value::as_object_mut) {
+                for sub_schema in properties.values_mut() {
+                    conform_schema_node(sub_schema);
                 }
             }
-            Value::Array(arr) => {
-                for v in arr.iter_mut() {
-                    remove_properties(v);
+            // `items` is either a single schema or (tuple validation) an array
+            // of schemas; the `Value::Array` arm handles the latter.
+            if let Some(items) = obj.get_mut("items") {
+                conform_schema_node(items);
+            }
+            if let Some(Value::Array(variants)) = obj.get_mut("anyOf") {
+                for variant in variants.iter_mut() {
+                    conform_schema_node(variant);
                 }
             }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                conform_schema_node(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Rewrites an array-valued `type` into a singular type the proto accepts.
+/// No-op when `type` is absent or already a string.
+fn collapse_type_union(obj: &mut serde_json::Map<String, Value>) {
+    let Some(Value::Array(types)) = obj.get("type") else {
+        return;
+    };
+
+    let mut first_non_null: Option<String> = None;
+    let mut saw_null = false;
+    for entry in types {
+        match entry.as_str() {
+            Some("null") => saw_null = true,
+            Some(other) if first_non_null.is_none() => first_non_null = Some(other.to_string()),
             _ => {}
         }
     }
 
-    remove_properties(&mut schema);
-    schema
+    match first_non_null {
+        Some(single) => {
+            obj.insert("type".to_string(), Value::String(single));
+        }
+        // Only `"null"` (or non-string garbage) was present — there is no
+        // representable type left, so drop it and rely on `nullable`.
+        None => {
+            obj.remove("type");
+        }
+    }
+
+    if saw_null {
+        obj.insert("nullable".to_string(), Value::Bool(true));
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -4555,6 +4647,114 @@ mod tests {
         let processed_schema =
             process_jsonschema_for_gcp_vertex_gemini(&output_schema_with_schema_fields);
         assert_eq!(processed_schema, expected_schema_without_schema_fields);
+
+        // Nullable union `["string", "null"]` collapses to a single type +
+        // `nullable: true`. This is the exact shape that produced the reported
+        // 400: `properties[..].type` was an array, but the proto's `type` is a
+        // singular enum ("Proto field is not repeating").
+        let union_schema = json!({
+            "type": "object",
+            "properties": {
+                "nickname": {"type": ["string", "null"], "description": "optional"},
+                "count": {"type": ["integer"]}
+            }
+        });
+        let expected_union = json!({
+            "type": "object",
+            "properties": {
+                "nickname": {"type": "string", "nullable": true, "description": "optional"},
+                "count": {"type": "integer"}
+            }
+        });
+        assert_eq!(
+            process_jsonschema_for_gcp_vertex_gemini(&union_schema),
+            expected_union
+        );
+        // No array-valued `type` may survive anywhere in the output.
+        assert!(
+            !contains_array_typed_type(&process_jsonschema_for_gcp_vertex_gemini(&union_schema)),
+            "conformed schema must not contain an array-valued `type`"
+        );
+
+        // A multi-non-null union keeps the first member deterministically (the
+        // proto cannot express the union).
+        let multi_union = json!({"type": ["string", "number"]});
+        assert_eq!(
+            process_jsonschema_for_gcp_vertex_gemini(&multi_union),
+            json!({"type": "string"})
+        );
+
+        // Composition keywords the proto does not model are dropped at every
+        // depth; `anyOf` is modelled and is preserved (and recursed into).
+        let composition_schema = json!({
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": ["integer", "null"]}
+                    ]
+                },
+                "legacy": {
+                    "oneOf": [{"type": "string"}],
+                    "allOf": [{"type": "string"}],
+                    "not": {"type": "boolean"},
+                    "const": "x",
+                    "type": "string"
+                }
+            }
+        });
+        let expected_composition = json!({
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "integer", "nullable": true}
+                    ]
+                },
+                "legacy": {"type": "string"}
+            }
+        });
+        assert_eq!(
+            process_jsonschema_for_gcp_vertex_gemini(&composition_schema),
+            expected_composition
+        );
+
+        // The conformance pass is idempotent.
+        let once = process_jsonschema_for_gcp_vertex_gemini(&composition_schema);
+        let twice = process_jsonschema_for_gcp_vertex_gemini(&once);
+        assert_eq!(once, twice, "conformance must be idempotent");
+
+        // `properties` keys that happen to collide with schema keywords (e.g. a
+        // user property literally named `type`) must NOT be filtered by the
+        // allowlist — only true schema nodes are.
+        let colliding = json!({
+            "type": "object",
+            "properties": {
+                "type": {"type": "string"},
+                "enum": {"type": "integer"}
+            }
+        });
+        assert_eq!(
+            process_jsonschema_for_gcp_vertex_gemini(&colliding),
+            colliding
+        );
+    }
+
+    /// Returns true if any node in the schema has a `type` whose value is a
+    /// JSON array (the Gemini-incompatible union shape).
+    fn contains_array_typed_type(value: &Value) -> bool {
+        match value {
+            Value::Object(obj) => {
+                if matches!(obj.get("type"), Some(Value::Array(_))) {
+                    return true;
+                }
+                obj.values().any(contains_array_typed_type)
+            }
+            Value::Array(arr) => arr.iter().any(contains_array_typed_type),
+            _ => false,
+        }
     }
 
     #[test]
