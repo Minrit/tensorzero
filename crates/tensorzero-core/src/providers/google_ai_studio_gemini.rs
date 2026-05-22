@@ -11,7 +11,6 @@ use tokio::time::Instant;
 use url::Url;
 use uuid::Uuid;
 
-use super::helpers::check_new_tool_call_name;
 use super::helpers::inject_extra_request_data_and_send_eventsource;
 use crate::endpoints::inference::InferenceCredentials;
 use crate::error::warn_discarded_unknown_chunk;
@@ -819,27 +818,20 @@ fn content_part_to_tensorzero_chunk(
         }
         FlattenUnknown::Normal(GeminiResponseContentPartData::FunctionCall(function_call)) => {
             let arguments = serialize_or_log(&function_call.args);
-            let name = check_new_tool_call_name(function_call.name, last_tool_name);
-            if name.is_some() {
-                // If a name comes from check_new_tool_call_name, we need to increment the tool call index
-                // because this is a new tool call.
-                // This will be used as a new ID so we can differentiate between tool calls.
-                let new_tool_idx = match last_tool_idx {
-                    Some(idx) => *idx + 1,
-                    None => 0,
-                };
-                *last_tool_idx = Some(new_tool_idx);
-            }
-            let id = match last_tool_idx {
-                Some(idx) => idx.to_string(),
-                None => return Err(Error::new(ErrorDetails::Inference {
-                    message: "Tool call index is not set in Google AI Studio Gemini. This should never happen. Please file a bug report: https://github.com/tensorzero/tensorzero/discussions/categories/bug-reports".to_string(),
-                })),
+            // Gemini stream chunks contain complete `functionCall` parts, not
+            // OpenAI-style argument deltas. Consecutive calls may use the same
+            // function name with different arguments; treating same-name calls
+            // as continuations concatenates independent JSON objects.
+            let new_tool_idx = match last_tool_idx {
+                Some(idx) => *idx + 1,
+                None => 0,
             };
+            *last_tool_idx = Some(new_tool_idx);
+            *last_tool_name = Some(function_call.name.clone());
             output.push(ContentBlockChunk::ToolCall(ToolCallChunk {
-                raw_name: name,
+                raw_name: Some(function_call.name),
                 raw_arguments: arguments,
-                id,
+                id: new_tool_idx.to_string(),
             }));
         }
         FlattenUnknown::Unknown(part) => {
@@ -2530,6 +2522,90 @@ mod tests {
 
         // Verify finish reason for tool calls
         assert_eq!(chunk.finish_reason, Some(FinishReason::ToolCall));
+    }
+
+    #[test]
+    fn test_try_from_with_consecutive_same_name_function_calls() {
+        let first_call = GeminiResponseContentPartData::FunctionCall(GeminiResponseFunctionCall {
+            name: "searxng_search".to_string(),
+            args: json!({"query": "AI industry news", "time_range": "day"}),
+        });
+        let second_call = GeminiResponseContentPartData::FunctionCall(GeminiResponseFunctionCall {
+            name: "searxng_search".to_string(),
+            args: json!({"query": "AI 行业热点", "time_range": "day"}),
+        });
+        let content = GeminiResponseContent {
+            parts: vec![
+                GeminiResponseContentPart {
+                    thought: false,
+                    thought_signature: None,
+                    data: FlattenUnknown::Normal(first_call),
+                },
+                GeminiResponseContentPart {
+                    thought: false,
+                    thought_signature: None,
+                    data: FlattenUnknown::Normal(second_call),
+                },
+            ],
+        };
+        let candidate = GeminiResponseCandidate {
+            content: Some(content),
+            finish_reason: Some(GeminiFinishReason::Stop),
+        };
+        let response = GeminiResponse {
+            candidates: vec![candidate],
+            usage_metadata: None,
+        };
+
+        let mut last_tool_name = None;
+        let mut last_tool_idx = None;
+        let mut last_thought_id = 0;
+        let mut last_unknown_chunk_id = 0;
+        let chunk: ProviderInferenceResponseChunk =
+            convert_stream_response_with_metadata_to_chunk(ConvertStreamResponseArgs {
+                raw_response: "my_raw_chunk".to_string(),
+                response,
+                latency: Duration::from_millis(120),
+                last_tool_name: &mut last_tool_name,
+                last_tool_idx: &mut last_tool_idx,
+                last_thought_id: &mut last_thought_id,
+                last_unknown_chunk_id: &mut last_unknown_chunk_id,
+                discard_unknown_chunks: false,
+                model_name: "test_model",
+                provider_name: "test_provider",
+                model_inference_id: Uuid::now_v7(),
+            })
+            .unwrap();
+
+        assert_eq!(last_tool_idx, Some(1));
+        assert_eq!(last_tool_name, Some("searxng_search".to_string()));
+        assert_eq!(chunk.content.len(), 2);
+        match (&chunk.content[0], &chunk.content[1]) {
+            (
+                ContentBlockChunk::ToolCall(first_tool_call),
+                ContentBlockChunk::ToolCall(second_tool_call),
+            ) => {
+                assert_eq!(first_tool_call.raw_name, Some("searxng_search".to_string()));
+                assert_eq!(first_tool_call.id, "0");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&first_tool_call.raw_arguments)
+                        .unwrap(),
+                    json!({"query": "AI industry news", "time_range": "day"})
+                );
+
+                assert_eq!(
+                    second_tool_call.raw_name,
+                    Some("searxng_search".to_string())
+                );
+                assert_eq!(second_tool_call.id, "1");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&second_tool_call.raw_arguments)
+                        .unwrap(),
+                    json!({"query": "AI 行业热点", "time_range": "day"})
+                );
+            }
+            _ => panic!("Expected two independent tool call chunks"),
+        }
     }
 
     #[test]

@@ -27,7 +27,6 @@ use uuid::Uuid;
 
 pub mod optimization;
 
-use super::helpers::check_new_tool_call_name;
 use super::helpers::{
     inject_extra_request_data_and_send, inject_extra_request_data_and_send_eventsource,
 };
@@ -2830,27 +2829,20 @@ fn content_part_to_tensorzero_chunk(
             function_call,
         )) => {
             let arguments = serialize_or_log(&function_call.args);
-            let name = check_new_tool_call_name(function_call.name, last_tool_name);
-            if name.is_some() {
-                // If a name comes from check_new_tool_call_name, we need to increment the tool call index
-                // because this is a new tool call.
-                // This will be used as a new ID so we can differentiate between tool calls.
-                let new_tool_idx = match last_tool_idx {
-                    Some(idx) => *idx + 1,
-                    None => 0,
-                };
-                *last_tool_idx = Some(new_tool_idx);
-            }
-            let id = match last_tool_idx {
-                Some(idx) => idx.to_string(),
-                None => return Err(Error::new(ErrorDetails::Inference {
-                    message: "Tool call index is not set in GCP Vertex Gemini. This should never happen. Please file a bug report: https://github.com/tensorzero/tensorzero/discussions/categories/bug-reports".to_string(),
-                })),
+            // Gemini stream chunks contain complete `functionCall` parts, not
+            // OpenAI-style argument deltas. Consecutive calls may use the same
+            // function name with different arguments; treating same-name calls
+            // as continuations concatenates independent JSON objects.
+            let new_tool_idx = match last_tool_idx {
+                Some(idx) => *idx + 1,
+                None => 0,
             };
+            *last_tool_idx = Some(new_tool_idx);
+            *last_tool_name = Some(function_call.name.clone());
             output.push(ContentBlockChunk::ToolCall(ToolCallChunk {
-                raw_name: name,
+                raw_name: Some(function_call.name),
                 raw_arguments: arguments,
-                id,
+                id: new_tool_idx.to_string(),
             }));
         }
         FlattenUnknown::Normal(GCPVertexGeminiResponseContentPartData::ExecutableCode(_)) => {
@@ -5487,7 +5479,8 @@ mod tests {
         // Verify tool call tracking state - should be Some(0) for first tool call
         assert_eq!(last_tool_idx, Some(0));
 
-        // Test function call with same name (should not repeat name)
+        // Test function call with same name. Gemini emits complete function
+        // call parts, so same-name calls must stay independent.
         let function_call_part2 = GCPVertexGeminiResponseContentPart {
             thought: false,
             thought_signature: None,
@@ -5509,14 +5502,14 @@ mod tests {
             "test_provider",
         );
         assert!(result.is_ok());
-        assert_eq!(last_tool_idx, Some(0));
+        assert_eq!(last_tool_idx, Some(1));
         let chunks = result.unwrap();
         assert_eq!(chunks.len(), 1);
         match &chunks[0] {
             ContentBlockChunk::ToolCall(tool_call) => {
-                assert_eq!(tool_call.raw_name, None); // Should be None for continuation
+                assert_eq!(tool_call.raw_name, Some("get_weather".to_string()));
                 assert_eq!(tool_call.raw_arguments, r#"{"continue":true}"#);
-                assert_eq!(tool_call.id, "0");
+                assert_eq!(tool_call.id, "1");
             }
             _ => panic!("Expected tool call chunk"),
         }
@@ -5549,13 +5542,13 @@ mod tests {
             ContentBlockChunk::ToolCall(tool_call) => {
                 assert_eq!(tool_call.raw_name, Some("calculate".to_string()));
                 assert_eq!(tool_call.raw_arguments, r#"{"expression":"2+2"}"#);
-                assert_eq!(tool_call.id, "1");
+                assert_eq!(tool_call.id, "2");
             }
             _ => panic!("Expected tool call chunk"),
         }
         assert_eq!(last_tool_name, Some("calculate".to_string()));
-        // Verify tool call tracking state - should be Some(1) for second different tool call
-        assert_eq!(last_tool_idx, Some(1));
+        // Verify tool call tracking state - should be Some(2) for third tool call
+        assert_eq!(last_tool_idx, Some(2));
 
         // Test thought content part with text
         let thought_part = GCPVertexGeminiResponseContentPart {
