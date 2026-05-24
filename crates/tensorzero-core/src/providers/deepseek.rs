@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use url::Url;
 
 use super::helpers::{
-    convert_stream_error, inject_extra_request_data_and_send,
+    DynamicApiBase, convert_stream_error, inject_extra_request_data_and_send,
     inject_extra_request_data_and_send_eventsource,
 };
 use crate::endpoints::inference::InferenceCredentials;
@@ -130,20 +130,33 @@ impl DeepSeekCredentials {
 #[ts(export)]
 pub struct DeepSeekProvider {
     model_name: String,
+    api_base: Option<DynamicApiBase>,
     #[serde(skip)]
     credentials: DeepSeekCredentials,
 }
 
 impl DeepSeekProvider {
-    pub fn new(model_name: String, credentials: DeepSeekCredentials) -> Self {
+    pub fn new(
+        model_name: String,
+        api_base: Option<DynamicApiBase>,
+        credentials: DeepSeekCredentials,
+    ) -> Self {
         DeepSeekProvider {
             model_name,
+            api_base,
             credentials,
         }
     }
 
     pub fn model_name(&self) -> &str {
         &self.model_name
+    }
+
+    fn resolve_base_url(&self, dynamic_api_keys: &InferenceCredentials) -> Result<Url, Error> {
+        match &self.api_base {
+            Some(base) => base.resolve(dynamic_api_keys),
+            None => Ok(DEEPSEEK_DEFAULT_BASE_URL.clone()),
+        }
     }
 }
 
@@ -172,7 +185,8 @@ impl InferenceProvider for DeepSeekProvider {
             })
         })?;
 
-        let request_url = get_chat_url(&DEEPSEEK_DEFAULT_BASE_URL)?;
+        let resolved_base = self.resolve_base_url(dynamic_api_keys)?;
+        let request_url = get_chat_url(&resolved_base)?;
         let api_key = self
             .credentials
             .get_api_key(dynamic_api_keys)
@@ -283,7 +297,8 @@ impl InferenceProvider for DeepSeekProvider {
             })
         })?;
 
-        let request_url = get_chat_url(&DEEPSEEK_DEFAULT_BASE_URL)?;
+        let resolved_base = self.resolve_base_url(dynamic_api_keys)?;
+        let request_url = get_chat_url(&resolved_base)?;
         let api_key = self
             .credentials
             .get_api_key(dynamic_api_keys)
@@ -1030,6 +1045,100 @@ mod tests {
             DEEPSEEK_DEFAULT_BASE_URL.as_str(),
             "https://api.deepseek.com/v1"
         );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_provider_resolves_default_api_base() {
+        let provider =
+            DeepSeekProvider::new("deepseek-chat".to_string(), None, DeepSeekCredentials::None);
+        let credentials = InferenceCredentials::default();
+
+        let resolved = provider.resolve_base_url(&credentials).unwrap();
+
+        assert_eq!(resolved.as_str(), "https://api.deepseek.com/v1");
+        assert_eq!(
+            get_chat_url(&resolved).unwrap().as_str(),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_provider_resolves_static_api_base() {
+        let custom_base = Url::parse("https://deepseek.example.test/compatible/v1").unwrap();
+        let provider = DeepSeekProvider::new(
+            "deepseek-chat".to_string(),
+            Some(DynamicApiBase::Static(custom_base.clone())),
+            DeepSeekCredentials::None,
+        );
+        let credentials = InferenceCredentials::default();
+
+        let resolved = provider.resolve_base_url(&credentials).unwrap();
+
+        assert_eq!(resolved, custom_base);
+        assert_eq!(
+            get_chat_url(&resolved).unwrap().as_str(),
+            "https://deepseek.example.test/compatible/v1/chat/completions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_provider_resolves_dynamic_api_base() {
+        let provider = DeepSeekProvider::new(
+            "deepseek-chat".to_string(),
+            Some(DynamicApiBase::Dynamic("provider_api_base".to_string())),
+            DeepSeekCredentials::None,
+        );
+        let mut credentials = InferenceCredentials::default();
+        credentials.insert(
+            "provider_api_base".to_string(),
+            SecretString::from("https://deepseek.example.test/v1"),
+        );
+
+        let resolved = provider.resolve_base_url(&credentials).unwrap();
+
+        assert_eq!(resolved.as_str(), "https://deepseek.example.test/v1");
+        assert_eq!(
+            get_chat_url(&resolved).unwrap().as_str(),
+            "https://deepseek.example.test/v1/chat/completions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_provider_rejects_missing_dynamic_api_base() {
+        let provider = DeepSeekProvider::new(
+            "deepseek-chat".to_string(),
+            Some(DynamicApiBase::Dynamic("provider_api_base".to_string())),
+            DeepSeekCredentials::None,
+        );
+        let credentials = InferenceCredentials::default();
+
+        let error = provider.resolve_base_url(&credentials).unwrap_err();
+
+        assert!(matches!(
+            error.get_details(),
+            ErrorDetails::DynamicEndpointNotFound { key_name } if key_name == "provider_api_base"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_provider_rejects_invalid_dynamic_api_base() {
+        let provider = DeepSeekProvider::new(
+            "deepseek-chat".to_string(),
+            Some(DynamicApiBase::Dynamic("provider_api_base".to_string())),
+            DeepSeekCredentials::None,
+        );
+        let mut credentials = InferenceCredentials::default();
+        credentials.insert(
+            "provider_api_base".to_string(),
+            SecretString::from("not-a-url"),
+        );
+
+        let error = provider.resolve_base_url(&credentials).unwrap_err();
+
+        assert!(matches!(
+            error.get_details(),
+            ErrorDetails::InvalidDynamicEndpoint { url } if url == "not-a-url"
+        ));
     }
 
     #[tokio::test]

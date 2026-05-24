@@ -557,9 +557,11 @@ impl TryFrom<StoredProviderConfig> for UninitializedProviderConfig {
             }),
             StoredProviderConfig::DeepSeek {
                 model_name,
+                api_base,
                 api_key_location,
             } => Ok(Self::DeepSeek {
                 model_name,
+                api_base: api_base.map(CredentialLocationOrHardcoded::from),
                 api_key_location: api_key_location.map(CredentialLocationWithFallback::from),
             }),
             #[cfg(any(test, feature = "e2e_tests"))]
@@ -1907,6 +1909,8 @@ pub enum UninitializedProviderConfig {
     DeepSeek {
         model_name: String,
         #[ts(type = "string | null")]
+        api_base: Option<CredentialLocationOrHardcoded>,
+        #[ts(type = "string | null")]
         api_key_location: Option<CredentialLocationWithFallback>,
     },
     #[cfg(any(test, feature = "e2e_tests"))]
@@ -2171,9 +2175,13 @@ impl From<&UninitializedProviderConfig> for StoredProviderConfig {
             },
             UninitializedProviderConfig::DeepSeek {
                 model_name,
+                api_base,
                 api_key_location,
             } => StoredProviderConfig::DeepSeek {
                 model_name: model_name.clone(),
+                api_base: api_base
+                    .as_ref()
+                    .map(StoredCredentialLocationOrHardcoded::from),
                 api_key_location: api_key_location
                     .as_ref()
                     .map(StoredCredentialLocationWithFallback::from),
@@ -2598,16 +2606,27 @@ impl UninitializedProviderConfig {
             )),
             UninitializedProviderConfig::DeepSeek {
                 model_name,
+                api_base,
                 api_key_location,
-            } => ProviderConfig::DeepSeek(DeepSeekProvider::new(
-                model_name,
-                DeepSeekKind
-                    .get_defaulted_credential(
-                        api_key_location.as_ref(),
-                        provider_type_default_credentials,
-                    )
-                    .await?,
-            )),
+            } => {
+                let api_base = api_base
+                    .map(|loc| {
+                        crate::providers::helpers::DynamicApiBase::from_credential_location(
+                            loc, "deepseek",
+                        )
+                    })
+                    .transpose()?;
+                ProviderConfig::DeepSeek(DeepSeekProvider::new(
+                    model_name,
+                    api_base,
+                    DeepSeekKind
+                        .get_defaulted_credential(
+                            api_key_location.as_ref(),
+                            provider_type_default_credentials,
+                        )
+                        .await?,
+                ))
+            }
             #[cfg(any(test, feature = "e2e_tests"))]
             UninitializedProviderConfig::Dummy {
                 model_name,
@@ -3574,6 +3593,7 @@ impl ShorthandModelConfig for ModelConfig {
             )),
             "deepseek" => ProviderConfig::DeepSeek(DeepSeekProvider::new(
                 model_name,
+                None,
                 DeepSeekKind
                     .get_defaulted_credential(None, default_credentials)
                     .await?,
@@ -4849,6 +4869,54 @@ mod tests {
         assert_eq!(json, r#""env::API_KEY""#);
     }
 
+    #[tokio::test]
+    async fn test_deepseek_provider_load_accepts_dynamic_api_base() {
+        let provider_types = ProviderTypesConfig::default();
+        let default_credentials = ProviderTypeDefaultCredentials::new(&provider_types).into();
+        let config = UninitializedProviderConfig::DeepSeek {
+            model_name: "deepseek-chat".to_string(),
+            api_base: Some(CredentialLocationOrHardcoded::Location(
+                CredentialLocation::Dynamic("provider_api_base".to_string()),
+            )),
+            api_key_location: Some(CredentialLocationWithFallback::Single(
+                CredentialLocation::Dynamic("deepseek_api_key".to_string()),
+            )),
+        };
+
+        let provider = config
+            .load(&provider_types, &default_credentials, false)
+            .await
+            .unwrap();
+
+        assert!(matches!(provider, ProviderConfig::DeepSeek(_)));
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_provider_load_rejects_invalid_hardcoded_api_base() {
+        let provider_types = ProviderTypesConfig::default();
+        let default_credentials = ProviderTypeDefaultCredentials::new(&provider_types).into();
+        let config = UninitializedProviderConfig::DeepSeek {
+            model_name: "deepseek-chat".to_string(),
+            api_base: Some(CredentialLocationOrHardcoded::Hardcoded(
+                "not-a-url".to_string(),
+            )),
+            api_key_location: Some(CredentialLocationWithFallback::Single(
+                CredentialLocation::Dynamic("deepseek_api_key".to_string()),
+            )),
+        };
+
+        let error = config
+            .load(&provider_types, &default_credentials, false)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.get_details(),
+            ErrorDetails::Config { message }
+                if message.contains("Invalid `api_base` URL for `deepseek` provider")
+        ));
+    }
+
     #[test]
     fn test_credential_location_with_fallback_serialize_with_fallback() {
         // Test serializing a WithFallback variant
@@ -5376,6 +5444,55 @@ mod tests {
                 )),
                 beta_structured_outputs: Some(true),
                 provider_tools: vec![],
+            };
+            let stored = StoredProviderConfig::from(&original);
+            let restored: UninitializedProviderConfig =
+                stored.try_into().expect("should convert back");
+            expect_that!(restored, eq(&original));
+        }
+
+        #[gtest]
+        fn test_provider_config_deepseek_round_trip_without_api_base() {
+            let original = UninitializedProviderConfig::DeepSeek {
+                model_name: "deepseek-chat".to_string(),
+                api_base: None,
+                api_key_location: Some(CredentialLocationWithFallback::Single(
+                    CredentialLocation::Env("DEEPSEEK_API_KEY".to_string()),
+                )),
+            };
+            let stored = StoredProviderConfig::from(&original);
+            let restored: UninitializedProviderConfig =
+                stored.try_into().expect("should convert back");
+            expect_that!(restored, eq(&original));
+        }
+
+        #[gtest]
+        fn test_provider_config_deepseek_round_trip_with_dynamic_api_base() {
+            let original = UninitializedProviderConfig::DeepSeek {
+                model_name: "deepseek-chat".to_string(),
+                api_base: Some(CredentialLocationOrHardcoded::Location(
+                    CredentialLocation::Dynamic("provider_api_base".to_string()),
+                )),
+                api_key_location: Some(CredentialLocationWithFallback::Single(
+                    CredentialLocation::Env("DEEPSEEK_API_KEY".to_string()),
+                )),
+            };
+            let stored = StoredProviderConfig::from(&original);
+            let restored: UninitializedProviderConfig =
+                stored.try_into().expect("should convert back");
+            expect_that!(restored, eq(&original));
+        }
+
+        #[gtest]
+        fn test_provider_config_deepseek_round_trip_with_hardcoded_api_base() {
+            let original = UninitializedProviderConfig::DeepSeek {
+                model_name: "deepseek-chat".to_string(),
+                api_base: Some(CredentialLocationOrHardcoded::Hardcoded(
+                    "https://deepseek.example.test/v1".to_string(),
+                )),
+                api_key_location: Some(CredentialLocationWithFallback::Single(
+                    CredentialLocation::Env("DEEPSEEK_API_KEY".to_string()),
+                )),
             };
             let stored = StoredProviderConfig::from(&original);
             let restored: UninitializedProviderConfig =

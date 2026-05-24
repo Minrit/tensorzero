@@ -1328,6 +1328,24 @@ api_key_location = "dynamic::deepseek_api_key"
 # ...
 ```
 
+##### `api_base`
+
+- **Type:** string
+- **Required:** no (default: `https://api.deepseek.com/v1`)
+
+Defines the base URL for the DeepSeek Chat Completions-compatible endpoint. The gateway appends `/chat/completions` when it sends a request.
+
+This field supports hardcoded URLs, `env::ENVIRONMENT_VARIABLE`, `path::FILE_PATH`, and `dynamic::ARGUMENT_NAME`. Use `dynamic::provider_api_base` when a trusted control plane validates and supplies the endpoint per request.
+
+```toml title="tensorzero.toml"
+[models.deepseek_chat.providers.deepseek]
+# ...
+type = "deepseek"
+api_base = "dynamic::provider_api_base"
+# api_base = "https://api.deepseek.com/v1"
+# ...
+```
+
 ##### `model_name`
 
 - **Type:** string

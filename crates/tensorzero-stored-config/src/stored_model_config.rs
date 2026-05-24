@@ -159,6 +159,7 @@ pub enum StoredProviderConfig {
     },
     DeepSeek {
         model_name: String,
+        api_base: Option<StoredCredentialLocationOrHardcoded>,
         api_key_location: Option<StoredCredentialLocationWithFallback>,
     },
     #[cfg(any(test, feature = "e2e_tests"))]
