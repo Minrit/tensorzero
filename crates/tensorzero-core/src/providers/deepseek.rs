@@ -32,7 +32,7 @@ use crate::model::Credential;
 use crate::model::{ModelProviderRequestInfo, ProviderInferenceRequest};
 use crate::providers::chat_completions::prepare_chat_completion_tools;
 use crate::providers::chat_completions::{ChatCompletionTool, ChatCompletionToolChoice};
-use crate::providers::deepseek_dsml::{DsmlDiagnostic, DsmlStreamState};
+use crate::providers::deepseek_dsml::{DsmlConsumed, DsmlDiagnostic, DsmlStreamState};
 use crate::providers::openai::{
     OpenAIAssistantRequestMessage, OpenAIContentBlock, OpenAIRequestMessage,
     OpenAISystemRequestMessage, OpenAIUserRequestMessage, StreamOptions, SystemOrDeveloper,
@@ -40,7 +40,7 @@ use crate::providers::openai::{
     prepare_system_or_developer_message, tensorzero_to_openai_messages,
 };
 use crate::providers::openai::{OpenAIMessagesConfig, ReasoningFieldName};
-use crate::tool::ToolCallChunk;
+use crate::tool::{ToolCall, ToolCallChunk};
 use serde_json::Value;
 use tensorzero_types_providers::deepseek::{
     DeepSeekChatChunk, DeepSeekResponse, DeepSeekResponseChoice, DeepSeekResponseFormat,
@@ -780,8 +780,26 @@ impl<'a> TryFrom<DeepSeekResponseWithMetadata<'a>> for ProviderInferenceResponse
                 extra_data: None,
             }));
         }
+        let mut finish_reason = finish_reason.map(Into::into);
         if let Some(text) = message.content {
-            content.push(text.into());
+            let dsml_consumed =
+                recover_non_streaming_dsml_tool_calls(&text, model_inference_id);
+            log_dsml_diagnostics(&dsml_consumed.diagnostics);
+            if !dsml_consumed.text_passthrough.is_empty() {
+                content.push(dsml_consumed.text_passthrough.into());
+            }
+            if !dsml_consumed.tool_calls.is_empty() {
+                content.extend(
+                    dsml_consumed
+                        .tool_calls
+                        .into_iter()
+                        .map(tool_call_chunk_to_tool_call)
+                        .map(ContentBlockOutput::ToolCall),
+                );
+                if finish_reason == Some(FinishReason::Stop) {
+                    finish_reason = Some(FinishReason::ToolCall);
+                }
+            }
         }
         if let Some(tool_calls) = message.tool_calls {
             for tool_call in tool_calls {
@@ -813,7 +831,7 @@ impl<'a> TryFrom<DeepSeekResponseWithMetadata<'a>> for ProviderInferenceResponse
                 raw_usage,
                 relay_raw_response: None,
                 provider_latency: latency,
-                finish_reason: finish_reason.map(Into::into),
+                finish_reason,
             },
         ))
     }
@@ -823,6 +841,19 @@ fn deepseek_usage_from_raw_response(raw_response: &str) -> Option<Value> {
     serde_json::from_str::<Value>(raw_response)
         .ok()
         .and_then(|value| value.get("usage").filter(|v| !v.is_null()).cloned())
+}
+
+fn recover_non_streaming_dsml_tool_calls(text: &str, model_inference_id: Uuid) -> DsmlConsumed {
+    let mut state = DsmlStreamState::default();
+    state.consume(text, true, model_inference_id)
+}
+
+fn tool_call_chunk_to_tool_call(tool_call: ToolCallChunk) -> ToolCall {
+    ToolCall {
+        id: tool_call.id,
+        name: tool_call.raw_name.unwrap_or_default(),
+        arguments: tool_call.raw_arguments,
+    }
 }
 
 /// If a message is a system, user, or assistant message and the next message is the same type, coalesce them into a single message
@@ -1373,6 +1404,76 @@ mod tests {
             }
         );
         assert_eq!(inference_response.finish_reason, Some(FinishReason::Stop));
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_non_streaming_recovers_dsml_tool_call() {
+        let model_inference_id =
+            Uuid::parse_str("018cb37e-a000-7af7-84eb-04218e011e69").unwrap();
+        let dsml = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"glob\"><｜｜DSML｜｜parameter name=\"pattern\" string=\"true\">/workspace/chunjiang/**</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
+        let response = DeepSeekResponse {
+            choices: vec![DeepSeekResponseChoice {
+                index: 0,
+                message: DeepSeekResponseMessage {
+                    content: Some(format!("before {dsml} after")),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some(OpenAIFinishReason::Stop),
+            }],
+            usage: DeepSeekUsage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(20),
+                prompt_cache_hit_tokens: None,
+                prompt_cache_miss_tokens: None,
+            },
+        };
+        let generic_request = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::User,
+                content: vec!["test_user".to_string().into()],
+            }],
+            system: None,
+            stream: false,
+            json_mode: ModelInferenceRequestJsonMode::Off,
+            tool_config: None,
+            function_type: FunctionType::Chat,
+            output_schema: None,
+            extra_body: Default::default(),
+            ..Default::default()
+        };
+        let deepseek_response_with_metadata = DeepSeekResponseWithMetadata {
+            response,
+            raw_response: "test_response".to_string(),
+            latency: Latency::NonStreaming {
+                response_time: Duration::from_secs(0),
+            },
+            raw_request: "{}".to_string(),
+            generic_request: &generic_request,
+            model_inference_id,
+        };
+
+        let inference_response: ProviderInferenceResponse =
+            deepseek_response_with_metadata.try_into().unwrap();
+
+        assert_eq!(inference_response.output.len(), 2);
+        assert_eq!(inference_response.output[0], "before  after".to_string().into());
+        match &inference_response.output[1] {
+            ContentBlockOutput::ToolCall(tool_call) => {
+                assert_eq!(tool_call.name, "glob");
+                assert_eq!(
+                    tool_call.arguments,
+                    r#"{"pattern":"/workspace/chunjiang/**"}"#
+                );
+                assert!(tool_call.id.starts_with("dsml-"));
+            }
+            other => panic!("expected DSML content to recover as tool call, got {other:?}"),
+        }
+        assert_eq!(
+            inference_response.finish_reason,
+            Some(FinishReason::ToolCall)
+        );
     }
 
     #[tokio::test]
