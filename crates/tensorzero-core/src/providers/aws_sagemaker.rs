@@ -5,8 +5,9 @@ use aws_smithy_eventstream::frame::{DecodedFrame, MessageFrameDecoder};
 use aws_types::region::Region;
 use bytes::BytesMut;
 use futures::StreamExt;
-use reqwest_sse_stream::SseStream;
+use reqwest_sse_stream::{Event, MessageEvent, ReqwestSseStreamError, Sse, SseError, SseStream};
 use serde::Serialize;
+use std::pin::Pin;
 use std::time::Instant;
 
 use super::aws_common::{
@@ -31,6 +32,36 @@ use crate::model::{CredentialLocation, CredentialLocationOrHardcoded};
 #[expect(unused)]
 const PROVIDER_NAME: &str = "AWS Sagemaker";
 pub const PROVIDER_TYPE: &str = "aws_sagemaker";
+
+fn sagemaker_sse_stream_to_events<S>(
+    sse_stream: S,
+) -> Pin<Box<dyn futures::Stream<Item = Result<Event, TensorZeroEventError>> + Send>>
+where
+    S: futures::Stream<Item = Result<Sse, SseError>> + Send + 'static,
+{
+    Box::pin(async_stream::stream! {
+        futures::pin_mut!(sse_stream);
+        while let Some(event) = sse_stream.next().await {
+            match event {
+                Ok(sse) => {
+                    if let Some(data) = sse.data {
+                        yield Ok(Event::Message(MessageEvent {
+                            event: sse.event.unwrap_or_default(),
+                            data,
+                            id: sse.id.unwrap_or_default(),
+                        }));
+                    }
+                }
+                Err(e) => {
+                    yield Err(TensorZeroEventError::EventSource(Box::new(
+                        ReqwestSseStreamError::SseError(e),
+                    )));
+                    break;
+                }
+            }
+        }
+    })
+}
 
 /// AWS SageMaker provider using direct HTTP calls.
 #[derive(ts_rs::TS, Debug, Serialize)]
@@ -141,6 +172,41 @@ impl AWSSagemakerProvider {
             PROVIDER_TYPE,
             api_type,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use futures::{StreamExt, stream};
+
+    use super::*;
+
+    fn test_body_error(message: &str) -> TensorZeroEventError {
+        TensorZeroEventError::TensorZero(Error::new(ErrorDetails::InferenceServer {
+            message: message.to_string(),
+            raw_request: Some("{}".to_string()),
+            raw_response: None,
+            provider_type: PROVIDER_TYPE.to_string(),
+            api_type: ApiType::ChatCompletions,
+        }))
+    }
+
+    #[tokio::test]
+    async fn test_sagemaker_sse_stream_stops_after_first_sse_error() {
+        let sse_stream = SseStream::from_byte_stream(stream::iter(vec![
+            Err(test_body_error("first body read failed")),
+            Err(test_body_error("second body read should not be observed")),
+            Ok(Cursor::new(b"data: should-not-arrive\n\n".to_vec())),
+        ]));
+        let mut event_stream = sagemaker_sse_stream_to_events(sse_stream);
+
+        assert!(matches!(
+            event_stream.next().await,
+            Some(Err(TensorZeroEventError::EventSource(_)))
+        ));
+        assert!(event_stream.next().await.is_none());
     }
 }
 
@@ -432,26 +498,8 @@ impl InferenceProvider for AWSSagemakerProvider {
 
         // Second, convert the byte stream to SSE events using sse_stream
         // The payload bytes contain SSE text from the hosted model (OpenAI/TGI)
-        let event_stream = futures::stream::iter([Ok(reqwest_sse_stream::Event::Open)]).chain(
-            SseStream::from_byte_stream(sagemaker_byte_stream).filter_map(|r| async {
-                match r {
-                    Ok(sse) => {
-                        // Only yield Message events when data is present
-                        sse.data.map(|data| {
-                            Ok(reqwest_sse_stream::Event::Message(
-                                reqwest_sse_stream::MessageEvent {
-                                    event: sse.event.unwrap_or_default(),
-                                    data,
-                                    id: sse.id.unwrap_or_default(),
-                                },
-                            ))
-                        })
-                    }
-                    Err(e) => Some(Err(TensorZeroEventError::EventSource(Box::new(
-                        reqwest_sse_stream::ReqwestSseStreamError::SseError(e),
-                    )))),
-                }
-            }),
+        let event_stream = futures::stream::iter([Ok(Event::Open)]).chain(
+            sagemaker_sse_stream_to_events(SseStream::from_byte_stream(sagemaker_byte_stream)),
         );
 
         // Use WrappedProvider's stream_events to handle the inner SSE format

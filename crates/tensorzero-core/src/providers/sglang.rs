@@ -30,7 +30,8 @@ use crate::inference::types::{
 use crate::model::Credential;
 use crate::model::{ModelProviderRequestInfo, ProviderInferenceRequest};
 use crate::providers::helpers::{
-    inject_extra_request_data_and_send, inject_extra_request_data_and_send_eventsource,
+    convert_stream_error, inject_extra_request_data_and_send,
+    inject_extra_request_data_and_send_eventsource,
 };
 use crate::providers::openai::{OpenAIMessagesConfig, ReasoningFieldName, check_api_base_suffix};
 use crate::tool::ToolCallChunk;
@@ -289,7 +290,8 @@ impl InferenceProvider for SGLangProvider {
         )
         .await?;
 
-        let stream = stream_sglang(event_source, start_time, model_inference_id).peekable();
+        let stream =
+            stream_sglang(event_source, start_time, &raw_request, model_inference_id).peekable();
         Ok((stream, raw_request))
     }
 
@@ -387,25 +389,16 @@ struct SGLangChatChunk {
 fn stream_sglang(
     mut event_source: TensorZeroEventSource,
     start_time: Instant,
+    raw_request: &str,
     model_inference_id: Uuid,
 ) -> ProviderInferenceResponseStreamInner {
+    let raw_request = raw_request.to_string();
     let mut tool_call_ids = Vec::new();
     Box::pin(async_stream::stream! {
         while let Some(ev) = event_source.next().await {
             match ev {
                 Err(e) => {
-                    let message = e.to_string();
-                    let mut raw_response = None;
-                    if let reqwest_sse_stream::ReqwestSseStreamError::InvalidStatusCode(_, resp) = *e {
-                        raw_response = resp.text().await.ok();
-                    }
-                    yield Err(ErrorDetails::InferenceServer {
-                        message,
-                        raw_request: None,
-                        raw_response,
-                        provider_type: PROVIDER_TYPE.to_string(),
-                        api_type: ApiType::ChatCompletions,
-                    }.into());
+                    yield Err(convert_stream_error(raw_request.clone(), PROVIDER_TYPE.to_string(), ApiType::ChatCompletions, *e, None).await);
                 }
                 Ok(event) => match event {
                     Event::Open => continue,

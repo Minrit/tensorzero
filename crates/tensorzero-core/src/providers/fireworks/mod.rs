@@ -23,7 +23,8 @@ use tokio::time::Instant;
 use url::Url;
 
 use super::helpers::{
-    inject_extra_request_data_and_send_eventsource, inject_extra_request_data_and_send_with_headers,
+    convert_stream_error, inject_extra_request_data_and_send_eventsource,
+    inject_extra_request_data_and_send_with_headers,
 };
 use crate::inference::types::Usage;
 use crate::inference::types::usage::raw_usage_entries_from_value;
@@ -315,7 +316,8 @@ impl InferenceProvider for FireworksProvider {
         )
         .await?;
         // Use our own stream implementation to handle thinking blocks
-        let stream = stream_fireworks(event_source, start_time, model_inference_id).peekable();
+        let stream =
+            stream_fireworks(event_source, start_time, &raw_request, model_inference_id).peekable();
         Ok((stream, raw_request))
     }
 
@@ -831,26 +833,17 @@ fn fireworks_tool_call_to_tensorzero(fireworks_tool_call: FireworksResponseToolC
 fn stream_fireworks(
     mut event_source: TensorZeroEventSource,
     start_time: Instant,
+    raw_request: &str,
     model_inference_id: Uuid,
 ) -> ProviderInferenceResponseStreamInner {
+    let raw_request = raw_request.to_string();
     let mut tool_call_ids = Vec::new();
     let mut thinking_state = ThinkingState::Normal;
     Box::pin(async_stream::stream! {
         while let Some(ev) = event_source.next().await {
             match ev {
                 Err(e) => {
-                    let message = e.to_string();
-                    let mut raw_response = None;
-                    if let reqwest_sse_stream::ReqwestSseStreamError::InvalidStatusCode(_, resp) = *e {
-                        raw_response = resp.text().await.ok();
-                    }
-                    yield Err(ErrorDetails::InferenceServer {
-                        message,
-                        raw_request: None,
-                        raw_response,
-                        provider_type: PROVIDER_TYPE.to_string(),
-                        api_type: ApiType::ChatCompletions,
-                    }.into());
+                    yield Err(convert_stream_error(raw_request.clone(), PROVIDER_TYPE.to_string(), ApiType::ChatCompletions, *e, None).await);
                 }
                 Ok(event) => match event {
                     Event::Open => continue,
