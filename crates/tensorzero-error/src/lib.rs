@@ -272,6 +272,10 @@ impl Error {
         self.details.is_retryable()
     }
 
+    pub fn is_fatal_stream_error(&self) -> bool {
+        matches!(*self.details, ErrorDetails::FatalStreamError { .. })
+    }
+
     /// Extracts raw response entries from inference errors in the error tree.
     ///
     /// Walks `AllVariantsFailed` -> `AllModelProvidersFailed` -> individual provider errors

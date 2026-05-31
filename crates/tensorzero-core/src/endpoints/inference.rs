@@ -1255,11 +1255,17 @@ fn create_stream(
         let mut finish_reasons: Vec<FinishReason> = vec![];
         let mut cost_raw_chunks: Vec<String> = vec![];
         let mut inference_ttft = None;
+        let mut stream_closed_due_to_fatal_error = false;
         while let Some(chunk) = stream.next().await {
             let mut chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
+                    let is_fatal_stream_error = e.is_fatal_stream_error();
                     yield Err(e);
+                    if is_fatal_stream_error {
+                        stream_closed_due_to_fatal_error = true;
+                        break;
+                    }
                     continue;
                 }
             };
@@ -1293,6 +1299,10 @@ fn create_stream(
             if should_stream_chunk_in_create_stream(&chunk, metadata.cached, metadata.include_original_response, metadata.include_raw_response, metadata.include_raw_usage) {
                 yield Ok(prepare_response_chunk(&metadata, chunk));
             }
+        }
+
+        if stream_closed_due_to_fatal_error {
+            return;
         }
 
         // If we saw multiple chunks with `finish_reason`, warn (unexpected behavior)
@@ -1622,7 +1632,17 @@ fn prepare_serialized_events(
                     })?
                 },
                 Err(e) => {
-                    e.build_streaming_error_event(false, include_raw_response)
+                    let is_fatal_stream_error = e.is_fatal_stream_error();
+                    let error_event = e.build_streaming_error_event(false, include_raw_response);
+                    yield Event::default().json_data(error_event).map_err(|e| {
+                        Error::new(ErrorDetails::Inference {
+                            message: format!("Failed to convert Value to Event: {e}"),
+                        })
+                    });
+                    if is_fatal_stream_error {
+                        break;
+                    }
+                    continue;
                 }
             };
             yield Event::default().json_data(chunk_json).map_err(|e| {

@@ -56,8 +56,8 @@ pub async fn convert_stream_error(
     request_id: Option<&str>,
 ) -> Error {
     let base_message = format_error_chain(&e);
-    // If we get an invalid status code, content type, or generic transport error,
-    // then we assume that we're never going to be able to read more chunks from the stream,
+    // If we get an invalid status code, content type, transport error, or SSE parser/body error,
+    // then we assume that we're never going to be able to read more chunks from the stream.
     // The `wrap_provider_stream` function will bail out when it sees this error,
     // to avoid holding open a broken stream (which will delay gateway shutdown when we
     // wait on the parent `Span` to finish)
@@ -135,8 +135,9 @@ pub async fn convert_stream_error(
                 Some(id) => format!("{base_message} [request_id: {id}]"),
                 None => base_message,
             };
-            ErrorDetails::InferenceServer {
+            ErrorDetails::FatalStreamError {
                 message,
+                status_code: None,
                 raw_request: Some(raw_request),
                 raw_response: None,
                 provider_type,
@@ -1292,6 +1293,43 @@ mod tests {
         }
         impl std::error::Error for Bare {}
         assert_eq!(format_error_chain(&Bare), "standalone error");
+    }
+
+    #[tokio::test]
+    async fn test_convert_sse_error_is_fatal_stream_error() {
+        let err = convert_stream_error(
+            "{}".to_string(),
+            "openai".to_string(),
+            ApiType::ChatCompletions,
+            reqwest_sse_stream::ReqwestSseStreamError::SseError(
+                reqwest_sse_stream::SseError::InvalidLine,
+            ),
+            Some("req_test"),
+        )
+        .await;
+
+        assert!(err.is_fatal_stream_error());
+        let ErrorDetails::FatalStreamError {
+            message,
+            status_code,
+            provider_type,
+            api_type,
+            ..
+        } = err.get_details()
+        else {
+            panic!("expected FatalStreamError");
+        };
+        assert_eq!(*status_code, None);
+        assert_eq!(provider_type, "openai");
+        assert_eq!(*api_type, ApiType::ChatCompletions);
+        assert!(
+            message.contains("SSE error"),
+            "unexpected error message: {message}"
+        );
+        assert!(
+            message.contains("[request_id: req_test]"),
+            "missing request_id in error message: {message}"
+        );
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use futures::{Stream, StreamExt};
 use http_body::Body;
 use thiserror::Error;
 
-pub use sse_stream::{Sse, SseStream};
+pub use sse_stream::{Error as SseError, Sse, SseStream};
 
 /// A boxed event stream that is `Unpin` and `Send`.
 pub type EventStream =
@@ -120,6 +120,29 @@ async fn start_stream_with_headers(
     ))
 }
 
+fn event_stream_from_sse_stream<S>(sse_stream: S) -> EventStream
+where
+    S: Stream<Item = Result<Sse, SseError>> + Send + 'static,
+{
+    Box::pin(async_stream::stream! {
+        yield Ok(Event::Open);
+        futures::pin_mut!(sse_stream);
+        while let Some(event) = sse_stream.next().await {
+            match event {
+                Ok(sse) => {
+                    if let Some(message_event) = MessageEvent::from_sse(sse) {
+                        yield Ok(Event::Message(message_event));
+                    }
+                }
+                Err(e) => {
+                    yield Err(ReqwestSseStreamError::SseError(e));
+                    break;
+                }
+            }
+        }
+    })
+}
+
 impl RequestBuilderExt for reqwest::RequestBuilder {
     async fn eventsource(self) -> Result<EventStream, ReqwestSseStreamError> {
         match self.eventsource_with_headers().await {
@@ -133,24 +156,7 @@ impl RequestBuilderExt for reqwest::RequestBuilder {
     ) -> Result<(EventStream, http::HeaderMap), (ReqwestSseStreamError, Option<http::HeaderMap>)>
     {
         match start_stream_with_headers(self).await {
-            Ok((mut sse_stream, headers)) => Ok((
-                Box::pin(async_stream::stream! {
-                    yield Ok(Event::Open);
-                    while let Some(event) = sse_stream.next().await {
-                        match event {
-                            Ok(sse) => {
-                                if let Some(message_event) = MessageEvent::from_sse(sse) {
-                                    yield Ok(Event::Message(message_event));
-                                }
-                            }
-                            Err(e) => {
-                                yield Err(ReqwestSseStreamError::SseError(e));
-                            }
-                        }
-                    }
-                }),
-                headers,
-            )),
+            Ok((sse_stream, headers)) => Ok((event_stream_from_sse_stream(sse_stream), headers)),
             // For backwards compatibility with our existing stream consumers, turn connection errors into a stream
             // with a single error event.
             Err((e, headers)) => Ok((
@@ -158,5 +164,39 @@ impl RequestBuilderExt for reqwest::RequestBuilder {
                 headers.unwrap_or_default(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Error as IoError, ErrorKind};
+
+    use futures::{StreamExt, stream};
+
+    use super::*;
+
+    #[test]
+    fn event_stream_stops_after_first_sse_body_error() {
+        futures::executor::block_on(async {
+            let sse_stream = SseStream::from_byte_stream(stream::iter(vec![
+                Err(IoError::new(
+                    ErrorKind::UnexpectedEof,
+                    "first body read failed",
+                )),
+                Err(IoError::new(
+                    ErrorKind::UnexpectedEof,
+                    "second body read should not be observed",
+                )),
+                Ok(Cursor::new(b"data: should-not-arrive\n\n".to_vec())),
+            ]));
+            let mut event_stream = event_stream_from_sse_stream(sse_stream);
+
+            assert!(matches!(event_stream.next().await, Some(Ok(Event::Open))));
+            assert!(matches!(
+                event_stream.next().await,
+                Some(Err(ReqwestSseStreamError::SseError(_)))
+            ));
+            assert!(event_stream.next().await.is_none());
+        });
     }
 }

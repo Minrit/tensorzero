@@ -331,12 +331,16 @@ pub fn prepare_serialized_openai_compatible_events(
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(e) => {
+                    let is_fatal_stream_error = e.is_fatal_stream_error();
                     let error_event = e.build_streaming_error_event(true, include_raw_response);
                     yield Event::default().json_data(&error_event).map_err(|ser_err| {
                         Error::new(ErrorDetails::Inference {
                             message: format!("Failed to convert error to Event: {ser_err}"),
                         })
                     });
+                    if is_fatal_stream_error {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -373,7 +377,46 @@ mod tests {
     use crate::inference::types::TextChunk;
     use crate::inference::types::usage::{ApiType, RawUsageEntry, Usage};
     use crate::tool::ToolCallChunk;
+    use futures::StreamExt as FuturesStreamExt;
     use uuid::Uuid;
+
+    fn test_fatal_stream_error() -> Error {
+        Error::new(ErrorDetails::FatalStreamError {
+            message: "mock upstream stream body read failed".to_string(),
+            status_code: None,
+            provider_type: "openai".to_string(),
+            api_type: ApiType::ChatCompletions,
+            raw_request: Some("{}".to_string()),
+            raw_response: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_prepare_openai_compatible_events_stops_after_fatal_stream_error() {
+        let stream: InferenceStream =
+            Box::pin(FuturesStreamExt::fuse(futures::stream::iter(vec![
+                Err(test_fatal_stream_error()),
+                Err(test_fatal_stream_error()),
+            ])));
+
+        let events: Vec<Result<Event, Error>> =
+            FuturesStreamExt::collect(prepare_serialized_openai_compatible_events(
+                stream,
+                "test-model".to_string(),
+                false,
+                false,
+                false,
+                false,
+            ))
+            .await;
+
+        assert_eq!(
+            events.len(),
+            2,
+            "fatal stream errors should produce one error event and one [DONE] event"
+        );
+        assert!(events.into_iter().all(|event| event.is_ok()));
+    }
 
     #[test]
     fn test_convert_chunk_with_usage_passthrough() {
