@@ -59,6 +59,7 @@ use crate::providers::claude_xml_tool_calls::{
 };
 use crate::providers::helpers_thinking_block::{
     END_THINK_TAG, END_THINK_TAG_LEN, REASONING_FIELD_CHUNK_ID, THINK_CHUNK_ID, THINK_TAG,
+    THINK_TAG_LEN,
     ThinkingState, process_think_blocks,
 };
 use crate::providers::helpers::{
@@ -3101,7 +3102,7 @@ fn push_openai_delta_text_with_think_tags(
         if !text.is_empty() {
             content.push(ContentBlockChunk::Text(TextChunk {
                 text: text.to_string(),
-                id: "0".to_string(),
+                id: thinking_state.get_id(),
             }));
         }
         return Ok(());
@@ -3147,20 +3148,38 @@ fn push_openai_delta_text_with_think_tags(
         return Ok(());
     }
 
-    if !thinking_state.update(text, provider_type, api_type)? {
-        match thinking_state {
-            ThinkingState::Normal | ThinkingState::Finished => {
-                if !text.is_empty() {
-                    content.push(ContentBlockChunk::Text(TextChunk {
-                        text: text.to_string(),
-                        id: thinking_state.get_id(),
-                    }));
+    if matches!(*thinking_state, ThinkingState::Normal | ThinkingState::Finished)
+        && text.contains(THINK_TAG)
+        && text.contains(END_THINK_TAG)
+        && (text.matches(THINK_TAG).count() != 1 || text.matches(END_THINK_TAG).count() != 1)
+    {
+        process_think_blocks(text, true, provider_type, api_type)?;
+    }
+
+    if thinking_state.update(text, provider_type, api_type)? {
+        if matches!(*thinking_state, ThinkingState::Thinking) {
+            if let Some(start) = text.find(THINK_TAG) {
+                let after_open = &text[start + THINK_TAG_LEN..];
+                if !after_open.is_empty() && !after_open.contains(END_THINK_TAG) {
+                    push_openai_thought_chunk(content, after_open.to_string(), THINK_CHUNK_ID);
                 }
             }
-            ThinkingState::Thinking => {
-                if !text.is_empty() {
-                    push_openai_thought_chunk(content, text.to_string(), &thinking_state.get_id());
-                }
+        }
+        return Ok(());
+    }
+
+    match thinking_state {
+        ThinkingState::Normal | ThinkingState::Finished => {
+            if !text.is_empty() {
+                content.push(ContentBlockChunk::Text(TextChunk {
+                    text: text.to_string(),
+                    id: thinking_state.get_id(),
+                }));
+            }
+        }
+        ThinkingState::Thinking => {
+            if !text.is_empty() {
+                push_openai_thought_chunk(content, text.to_string(), &thinking_state.get_id());
             }
         }
     }
@@ -4900,6 +4919,193 @@ mod tests {
         };
         assert_eq!(tags.id, THINK_CHUNK_ID);
         assert_eq!(tags.text.as_deref(), Some("tag reasoning"));
+    }
+
+    #[test]
+    fn openai_to_tensorzero_chunk_thinking_across_chunks() {
+        let mut tool_call_ids = Vec::new();
+        let mut thinking_state = ThinkingState::Normal;
+        let mut claude_xml = ClaudeXmlStreamState::default();
+
+        let open = openai_to_tensorzero_chunk(
+            "raw-open".to_string(),
+            OpenAIChatChunk {
+                choices: vec![OpenAIChatChunkChoice {
+                    delta: OpenAIDelta {
+                        content: Some("<think>".to_string()),
+                        reasoning_content: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: None,
+                }],
+                usage: None,
+            },
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut claude_xml,
+            &mut thinking_state,
+            true,
+            Uuid::now_v7(),
+            PROVIDER_TYPE,
+        )
+        .unwrap();
+        assert!(matches!(thinking_state, ThinkingState::Thinking));
+        assert!(open.content.is_empty());
+
+        let body = openai_to_tensorzero_chunk(
+            "raw-body".to_string(),
+            OpenAIChatChunk {
+                choices: vec![OpenAIChatChunkChoice {
+                    delta: OpenAIDelta {
+                        content: Some("reasoning".to_string()),
+                        reasoning_content: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: None,
+                }],
+                usage: None,
+            },
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut claude_xml,
+            &mut thinking_state,
+            true,
+            Uuid::now_v7(),
+            PROVIDER_TYPE,
+        )
+        .unwrap();
+        assert!(matches!(thinking_state, ThinkingState::Thinking));
+        assert_eq!(body.content.len(), 1);
+        let ContentBlockChunk::Thought(thought) = &body.content[0] else {
+            panic!("expected thought chunk");
+        };
+        assert_eq!(thought.text.as_deref(), Some("reasoning"));
+        assert_eq!(thought.id, THINK_CHUNK_ID);
+
+        let close = openai_to_tensorzero_chunk(
+            "raw-close".to_string(),
+            OpenAIChatChunk {
+                choices: vec![OpenAIChatChunkChoice {
+                    delta: OpenAIDelta {
+                        content: Some("</think>".to_string()),
+                        reasoning_content: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: None,
+                }],
+                usage: None,
+            },
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut claude_xml,
+            &mut thinking_state,
+            true,
+            Uuid::now_v7(),
+            PROVIDER_TYPE,
+        )
+        .unwrap();
+        assert!(matches!(thinking_state, ThinkingState::Finished));
+        assert!(close.content.is_empty());
+
+        let answer = openai_to_tensorzero_chunk(
+            "raw-answer".to_string(),
+            OpenAIChatChunk {
+                choices: vec![OpenAIChatChunkChoice {
+                    delta: OpenAIDelta {
+                        content: Some("Final answer".to_string()),
+                        reasoning_content: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: None,
+                }],
+                usage: None,
+            },
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut claude_xml,
+            &mut thinking_state,
+            true,
+            Uuid::now_v7(),
+            PROVIDER_TYPE,
+        )
+        .unwrap();
+        assert!(matches!(thinking_state, ThinkingState::Finished));
+        let ContentBlockChunk::Text(text) = &answer.content[0] else {
+            panic!("expected text chunk");
+        };
+        assert_eq!(text.text, "Final answer");
+        assert_eq!(text.id, "2");
+    }
+
+    #[test]
+    fn openai_to_tensorzero_chunk_open_tag_and_body_in_same_delta() {
+        let chunk = OpenAIChatChunk {
+            choices: vec![OpenAIChatChunkChoice {
+                delta: OpenAIDelta {
+                    content: Some("<think>rea".to_string()),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let mut tool_call_ids = Vec::new();
+        let mut thinking_state = ThinkingState::Normal;
+        let message = openai_to_tensorzero_chunk(
+            "raw".to_string(),
+            chunk,
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut ClaudeXmlStreamState::default(),
+            &mut thinking_state,
+            true,
+            Uuid::now_v7(),
+            PROVIDER_TYPE,
+        )
+        .unwrap();
+        assert!(matches!(thinking_state, ThinkingState::Thinking));
+        assert_eq!(message.content.len(), 1);
+        let ContentBlockChunk::Thought(thought) = &message.content[0] else {
+            panic!("expected thought chunk");
+        };
+        assert_eq!(thought.text.as_deref(), Some("rea"));
+    }
+
+    #[test]
+    fn openai_to_tensorzero_chunk_rejects_multiple_think_blocks_in_one_delta() {
+        let chunk = OpenAIChatChunk {
+            choices: vec![OpenAIChatChunkChoice {
+                delta: OpenAIDelta {
+                    content: Some(
+                        "<think>a</think><think>b</think>"
+                            .to_string(),
+                    ),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let mut tool_call_ids = Vec::new();
+        let mut thinking_state = ThinkingState::Normal;
+        let err = openai_to_tensorzero_chunk(
+            "raw".to_string(),
+            chunk,
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut ClaudeXmlStreamState::default(),
+            &mut thinking_state,
+            true,
+            Uuid::now_v7(),
+            PROVIDER_TYPE,
+        )
+        .expect_err("multiple think blocks must not leak as Text");
+        assert!(
+            err.to_string().contains("Multiple thinking blocks"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
