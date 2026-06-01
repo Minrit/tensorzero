@@ -46,14 +46,17 @@ use crate::inference::types::resolved_input::{FileUrl, LazyFile, LazyFileExt};
 use crate::inference::types::usage::raw_usage_entries_from_value;
 use crate::inference::types::{ApiType, ProviderInferenceResponseStreamInner, ThoughtChunk};
 use crate::inference::types::{
-    ContentBlock, ContentBlockChunk, ContentBlockOutput, Latency, ModelInferenceRequest,
-    ModelInferenceRequestJsonMode, PeekableProviderInferenceResponseStream,
+    ContentBlock, ContentBlockChunk, ContentBlockOutput, FinishReason, Latency,
+    ModelInferenceRequest, ModelInferenceRequestJsonMode, PeekableProviderInferenceResponseStream,
     ProviderInferenceResponse, ProviderInferenceResponseArgs, ProviderInferenceResponseChunk,
     RequestMessage, Role, Text, TextChunk, Thought, Unknown, Usage,
     batch::{BatchStatus, StartBatchProviderInferenceResponse},
 };
 use crate::model::Credential;
 use crate::model::{ModelProviderRequestInfo, ProviderInferenceRequest};
+use crate::providers::claude_xml_tool_calls::{
+    ClaudeXmlStreamState, recover_claude_xml_tool_calls, tool_call_chunk_to_tool_call,
+};
 use crate::providers::helpers::{
     InjectedResponse, convert_stream_error, inject_extra_request_data_and_send,
     inject_extra_request_data_and_send_eventsource_with_headers,
@@ -1121,6 +1124,7 @@ pub fn stream_openai(
     let mut saw_content_block = false;
     let mut encountered_error = false;
     let mut tool_call_ids = Vec::new();
+    let mut claude_xml_state = ClaudeXmlStreamState::default();
     Box::pin(async_stream::stream! {
         futures::pin_mut!(event_source);
         while let Some(ev) = event_source.next().await {
@@ -1147,6 +1151,33 @@ pub fn stream_openai(
                     Event::Open => continue,
                     Event::Message(message) => {
                         if message.data == "[DONE]" {
+                            let final_consumed =
+                                claude_xml_state.consume("", true, model_inference_id);
+                            if !final_consumed.text_passthrough.is_empty()
+                                || !final_consumed.tool_calls.is_empty()
+                            {
+                                saw_content_block = true;
+                                let mut content = Vec::new();
+                                if !final_consumed.text_passthrough.is_empty() {
+                                    content.push(ContentBlockChunk::Text(TextChunk {
+                                        text: final_consumed.text_passthrough,
+                                        id: "0".to_string(),
+                                    }));
+                                }
+                                content.extend(
+                                    final_consumed
+                                        .tool_calls
+                                        .into_iter()
+                                        .map(ContentBlockChunk::ToolCall),
+                                );
+                                yield Ok(ProviderInferenceResponseChunk::new(
+                                    content,
+                                    None,
+                                    message.data,
+                                    start_time.elapsed(),
+                                    None,
+                                ));
+                            }
                             break;
                         }
                         let data: Result<OpenAIChatChunk, Error> =
@@ -1171,6 +1202,7 @@ pub fn stream_openai(
                                 d,
                                 latency,
                                 &mut tool_call_ids,
+                                &mut claude_xml_state,
                                 model_inference_id,
                                 &provider_type,
                             )
@@ -2903,8 +2935,18 @@ impl<'a> TryFrom<OpenAIResponseWithMetadata<'a>> for ProviderInferenceResponse {
                 extra_data: None,
             }));
         }
+        let mut recovered_claude_xml_tool_call = false;
         if let Some(text) = message.content {
-            content.push(text.into());
+            let consumed = recover_claude_xml_tool_calls(&text, model_inference_id);
+            if !consumed.text_passthrough.is_empty() {
+                content.push(consumed.text_passthrough.into());
+            }
+            recovered_claude_xml_tool_call = !consumed.tool_calls.is_empty();
+            for tool_call in consumed.tool_calls {
+                content.push(ContentBlockOutput::ToolCall(tool_call_chunk_to_tool_call(
+                    tool_call,
+                )));
+            }
         }
         if let Some(tool_calls) = message.tool_calls {
             for tool_call in tool_calls {
@@ -2924,6 +2966,10 @@ impl<'a> TryFrom<OpenAIResponseWithMetadata<'a>> for ProviderInferenceResponse {
         let usage = response.usage.into();
         let system = generic_request.system.clone();
         let messages = generic_request.messages.clone();
+        let mut finish_reason = Some(finish_reason.into());
+        if finish_reason == Some(FinishReason::Stop) && recovered_claude_xml_tool_call {
+            finish_reason = Some(FinishReason::ToolCall);
+        }
         Ok(ProviderInferenceResponse::new(
             ProviderInferenceResponseArgs {
                 id: model_inference_id,
@@ -2936,7 +2982,7 @@ impl<'a> TryFrom<OpenAIResponseWithMetadata<'a>> for ProviderInferenceResponse {
                 relay_raw_response: None,
                 usage,
                 provider_latency: latency,
-                finish_reason: Some(finish_reason.into()),
+                finish_reason,
             },
         ))
     }
@@ -3016,6 +3062,7 @@ fn openai_to_tensorzero_chunk(
     mut chunk: OpenAIChatChunk,
     latency: Duration,
     tool_call_ids: &mut Vec<String>,
+    claude_xml_state: &mut ClaudeXmlStreamState,
     model_inference_id: Uuid,
     provider_type: &str,
 ) -> Result<ProviderInferenceResponseChunk, Error> {
@@ -3058,10 +3105,16 @@ fn openai_to_tensorzero_chunk(
             }));
         }
         if let Some(text) = choice.delta.content {
-            content.push(ContentBlockChunk::Text(TextChunk {
-                text,
-                id: "0".to_string(),
-            }));
+            let consumed = claude_xml_state.consume(&text, false, model_inference_id);
+            if !consumed.text_passthrough.is_empty() {
+                content.push(ContentBlockChunk::Text(TextChunk {
+                    text: consumed.text_passthrough,
+                    id: "0".to_string(),
+                }));
+            }
+            for tool_call in consumed.tool_calls {
+                content.push(ContentBlockChunk::ToolCall(tool_call));
+            }
         }
         if let Some(tool_calls) = choice.delta.tool_calls {
             for tool_call in tool_calls {
@@ -3091,6 +3144,9 @@ fn openai_to_tensorzero_chunk(
                     raw_arguments: tool_call.function.arguments.unwrap_or_default(),
                 }));
             }
+        }
+        if finish_reason == Some(FinishReason::Stop) && claude_xml_state.had_successful_emission {
+            finish_reason = Some(FinishReason::ToolCall);
         }
     }
 
@@ -3311,8 +3367,18 @@ impl TryFrom<OpenAIBatchFileRow> for ProviderBatchInferenceOutput {
 
         // Convert message content to ContentBlocks
         let mut content: Vec<ContentBlockOutput> = Vec::new();
+        let mut recovered_claude_xml_tool_call = false;
         if let Some(text) = message.content {
-            content.push(text.into());
+            let consumed = recover_claude_xml_tool_calls(&text, row.inference_id);
+            if !consumed.text_passthrough.is_empty() {
+                content.push(consumed.text_passthrough.into());
+            }
+            recovered_claude_xml_tool_call = !consumed.tool_calls.is_empty();
+            for tool_call in consumed.tool_calls {
+                content.push(ContentBlockOutput::ToolCall(tool_call_chunk_to_tool_call(
+                    tool_call,
+                )));
+            }
         }
         if let Some(tool_calls) = message.tool_calls {
             for tool_call in tool_calls {
@@ -3321,13 +3387,17 @@ impl TryFrom<OpenAIBatchFileRow> for ProviderBatchInferenceOutput {
                 ));
             }
         }
+        let mut finish_reason = Some(finish_reason.into());
+        if finish_reason == Some(FinishReason::Stop) && recovered_claude_xml_tool_call {
+            finish_reason = Some(FinishReason::ToolCall);
+        }
 
         Ok(Self {
             id: row.inference_id,
             output: content,
             raw_response,
             usage: response.usage.into(),
-            finish_reason: Some(finish_reason.into()),
+            finish_reason,
         })
     }
 }
@@ -4190,6 +4260,81 @@ mod tests {
         assert!(parallel_tool_calls.is_none());
     }
 
+    #[test]
+    fn try_from_openai_response_recovers_claude_xml_tool_call_text() {
+        let response = OpenAIResponse {
+            choices: vec![OpenAIResponseChoice {
+                index: 0,
+                message: OpenAIResponseMessage {
+                    content: Some(
+                        concat!(
+                            "before\n",
+                            "<function_calls>\n",
+                            "<invoke name=\"write_file\">\n",
+                            "<parameter name=\"path\">/workspace/index.html</parameter>\n",
+                            "<parameter name=\"content\"><!DOCTYPE html></parameter>\n",
+                            "</invoke>\n",
+                            "</function_calls>\n",
+                            "after",
+                        )
+                        .to_string(),
+                    ),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: OpenAIFinishReason::Stop,
+            }],
+            usage: None,
+        };
+        let generic_request = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::User,
+                content: vec!["build a site".to_string().into()],
+            }],
+            stream: false,
+            json_mode: ModelInferenceRequestJsonMode::On,
+            function_type: FunctionType::Chat,
+            ..Default::default()
+        };
+
+        let result = ProviderInferenceResponse::try_from(OpenAIResponseWithMetadata {
+            response,
+            latency: Latency::NonStreaming {
+                response_time: Duration::from_millis(100),
+            },
+            raw_request: "{}".to_string(),
+            generic_request: &generic_request,
+            raw_response: "{}".to_string(),
+            model_inference_id: Uuid::nil(),
+        })
+        .unwrap();
+
+        assert_eq!(result.finish_reason, Some(FinishReason::ToolCall));
+        assert_eq!(result.output.len(), 2);
+        assert_eq!(
+            result.output[0],
+            ContentBlockOutput::Text(Text {
+                text: "before\n\nafter".to_string(),
+            })
+        );
+        let ContentBlockOutput::ToolCall(tool_call) = &result.output[1] else {
+            panic!("expected recovered Claude XML tool call")
+        };
+        assert_eq!(
+            tool_call.id,
+            "claude-xml-00000000-0000-0000-0000-000000000000-0"
+        );
+        assert_eq!(tool_call.name, "write_file");
+        assert_eq!(
+            serde_json::from_str::<Value>(&tool_call.arguments).unwrap(),
+            serde_json::json!({
+                "content": "<!DOCTYPE html>",
+                "path": "/workspace/index.html",
+            })
+        );
+    }
+
     #[tokio::test]
     async fn test_tensorzero_to_openai_messages() {
         let content_blocks = vec!["Hello".to_string().into()];
@@ -4311,6 +4456,7 @@ mod tests {
             chunk.clone(),
             Duration::from_millis(50),
             &mut tool_call_ids,
+            &mut ClaudeXmlStreamState::default(),
             Uuid::now_v7(),
             PROVIDER_TYPE,
         )
@@ -4347,6 +4493,7 @@ mod tests {
             chunk.clone(),
             Duration::from_millis(50),
             &mut tool_call_ids,
+            &mut ClaudeXmlStreamState::default(),
             Uuid::now_v7(),
             PROVIDER_TYPE,
         )
@@ -4384,6 +4531,7 @@ mod tests {
             chunk.clone(),
             Duration::from_millis(50),
             &mut tool_call_ids,
+            &mut ClaudeXmlStreamState::default(),
             Uuid::now_v7(),
             PROVIDER_TYPE,
         )
@@ -4423,6 +4571,7 @@ mod tests {
             chunk.clone(),
             Duration::from_millis(50),
             &mut tool_call_ids,
+            &mut ClaudeXmlStreamState::default(),
             Uuid::now_v7(),
             PROVIDER_TYPE,
         )
@@ -4470,6 +4619,7 @@ mod tests {
             chunk.clone(),
             Duration::from_millis(50),
             &mut tool_call_ids,
+            &mut ClaudeXmlStreamState::default(),
             model_inference_id,
             PROVIDER_TYPE,
         )
@@ -4506,6 +4656,76 @@ mod tests {
             message.raw_usage, expected_raw_usage,
             "expected raw_usage to include provider raw_usage entries"
         );
+    }
+
+    #[test]
+    fn openai_to_tensorzero_chunk_buffers_split_claude_xml_tool_call() {
+        let mut state = ClaudeXmlStreamState::default();
+        let mut tool_call_ids = Vec::new();
+        let model_inference_id = Uuid::nil();
+        let first_chunk = OpenAIChatChunk {
+            choices: vec![OpenAIChatChunkChoice {
+                delta: OpenAIDelta {
+                    content: Some(
+                        "before <function_calls><invoke name=\"Task\"><parameter name=\"type\">explore"
+                            .to_string(),
+                    ),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let second_chunk = OpenAIChatChunk {
+            choices: vec![OpenAIChatChunkChoice {
+                delta: OpenAIDelta {
+                    content: Some("</parameter></invoke></function_calls>".to_string()),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some(OpenAIFinishReason::Stop),
+            }],
+            usage: None,
+        };
+
+        let first = openai_to_tensorzero_chunk(
+            "first".to_string(),
+            first_chunk,
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut state,
+            model_inference_id,
+            PROVIDER_TYPE,
+        )
+        .unwrap();
+        let second = openai_to_tensorzero_chunk(
+            "second".to_string(),
+            second_chunk,
+            Duration::from_millis(2),
+            &mut tool_call_ids,
+            &mut state,
+            model_inference_id,
+            PROVIDER_TYPE,
+        )
+        .unwrap();
+
+        assert_eq!(
+            first.content,
+            vec![ContentBlockChunk::Text(TextChunk {
+                id: "0".to_string(),
+                text: "before ".to_string(),
+            })]
+        );
+        assert_eq!(
+            second.content,
+            vec![ContentBlockChunk::ToolCall(ToolCallChunk {
+                id: "claude-xml-00000000-0000-0000-0000-000000000000-0".to_string(),
+                raw_name: Some("Task".to_string()),
+                raw_arguments: "{\"type\":\"explore\"}".to_string(),
+            })]
+        );
+        assert_eq!(second.finish_reason, Some(FinishReason::ToolCall));
     }
 
     #[test]

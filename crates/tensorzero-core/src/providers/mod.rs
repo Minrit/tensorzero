@@ -7,6 +7,7 @@ pub mod aws_common;
 pub mod aws_sagemaker;
 pub mod azure;
 pub mod chat_completions;
+pub mod claude_xml_tool_calls;
 pub mod deepseek;
 pub mod deepseek_dsml;
 #[cfg(any(test, feature = "e2e_tests"))]
