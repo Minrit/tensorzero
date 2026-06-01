@@ -304,6 +304,7 @@ impl InferenceProvider for XAIProvider {
             start_time,
             None,
             &raw_request,
+            false,
         );
         // Wrap with xAI-specific stream to add reasoning tokens to usage
         let stream = stream_xai(inner_stream).peekable();

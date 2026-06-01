@@ -494,6 +494,7 @@ impl TryFrom<StoredProviderConfig> for UninitializedProviderConfig {
                 include_encrypted_reasoning,
                 provider_tools,
                 content_type_overrides,
+                parse_think_tags_from_content,
             } => Ok(Self::OpenAI {
                 model_name,
                 api_base: api_base.map(CredentialLocationOrHardcoded::from),
@@ -506,6 +507,7 @@ impl TryFrom<StoredProviderConfig> for UninitializedProviderConfig {
                     .into_iter()
                     .map(|(k, v)| (k, ContentBlockType::from(v)))
                     .collect(),
+                parse_think_tags_from_content: parse_think_tags_from_content.unwrap_or(true),
             }),
             StoredProviderConfig::OpenRouter {
                 model_name,
@@ -1731,6 +1733,10 @@ pub enum HostedProviderKind {
     TGI,
 }
 
+fn default_parse_think_tags_from_content() -> bool {
+    true
+}
+
 #[derive(ts_rs::TS)]
 #[ts(export, optional_fields)]
 #[derive(Clone, Debug, PartialEq, TensorZeroDeserialize, VariantNames, Serialize)]
@@ -1871,6 +1877,8 @@ pub enum UninitializedProviderConfig {
         #[serde(default)]
         content_type_overrides:
             std::collections::HashMap<String, crate::providers::openai::ContentBlockType>,
+        #[serde(default = "default_parse_think_tags_from_content")]
+        parse_think_tags_from_content: bool,
     },
     OpenRouter {
         model_name: String,
@@ -2095,6 +2103,7 @@ impl From<&UninitializedProviderConfig> for StoredProviderConfig {
                 include_encrypted_reasoning,
                 provider_tools,
                 content_type_overrides,
+                parse_think_tags_from_content,
             } => StoredProviderConfig::OpenAI {
                 model_name: model_name.clone(),
                 api_base: api_base
@@ -2112,6 +2121,7 @@ impl From<&UninitializedProviderConfig> for StoredProviderConfig {
                         .map(|(k, v)| (k.clone(), v.into()))
                         .collect()
                 }),
+                parse_think_tags_from_content: Some(*parse_think_tags_from_content),
             },
             UninitializedProviderConfig::OpenRouter {
                 model_name,
@@ -2308,6 +2318,7 @@ impl UninitializedProviderConfig {
                             false,
                             Vec::new(),
                             std::collections::HashMap::new(),
+                            true,
                             )?),
                         HostedProviderKind::TGI => Box::new(TGIProvider::new(
                             Url::parse("http://tensorzero-unreachable-domain-please-file-a-bug-report.invalid").map_err(|e| {
@@ -2490,6 +2501,7 @@ impl UninitializedProviderConfig {
                 include_encrypted_reasoning,
                 provider_tools,
                 content_type_overrides,
+                parse_think_tags_from_content,
             } => {
                 // Use mock API base for testing if set, otherwise resolve from config
                 let api_base = if let Some(mock_url) = get_mock_provider_api_base("openai") {
@@ -2517,6 +2529,7 @@ impl UninitializedProviderConfig {
                     include_encrypted_reasoning,
                     provider_tools,
                     content_type_overrides,
+                    parse_think_tags_from_content,
                 )?)
             }
             UninitializedProviderConfig::OpenRouter {
@@ -3662,6 +3675,7 @@ impl ShorthandModelConfig for ModelConfig {
                         false,
                         Vec::new(),
                         std::collections::HashMap::new(),
+                        true,
                     )?)
                 } else {
                     ProviderConfig::OpenAI(OpenAIProvider::new(
@@ -3674,6 +3688,7 @@ impl ShorthandModelConfig for ModelConfig {
                         false,
                         Vec::new(),
                         std::collections::HashMap::new(),
+                        true,
                     )?)
                 }
             }
@@ -5387,6 +5402,7 @@ mod tests {
                 include_encrypted_reasoning: false,
                 provider_tools: vec![],
                 content_type_overrides: HashMap::new(),
+                parse_think_tags_from_content: true,
             };
             let stored = StoredProviderConfig::from(&original);
             let restored: UninitializedProviderConfig =
@@ -5408,6 +5424,7 @@ mod tests {
                 include_encrypted_reasoning: false,
                 provider_tools: vec![],
                 content_type_overrides: HashMap::new(),
+                parse_think_tags_from_content: true,
             };
             let stored = StoredProviderConfig::from(&original);
             let restored: UninitializedProviderConfig =
@@ -5513,6 +5530,7 @@ mod tests {
                     include_encrypted_reasoning: false,
                     provider_tools: vec![],
                     content_type_overrides: HashMap::new(),
+                    parse_think_tags_from_content: true,
                 },
                 extra_body: Some(ExtraBodyConfig {
                     data: vec![ExtraBodyReplacement {

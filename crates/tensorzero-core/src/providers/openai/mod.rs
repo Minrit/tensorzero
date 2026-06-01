@@ -57,6 +57,10 @@ use crate::model::{ModelProviderRequestInfo, ProviderInferenceRequest};
 use crate::providers::claude_xml_tool_calls::{
     ClaudeXmlStreamState, recover_claude_xml_tool_calls, tool_call_chunk_to_tool_call,
 };
+use crate::providers::helpers_thinking_block::{
+    END_THINK_TAG, END_THINK_TAG_LEN, REASONING_FIELD_CHUNK_ID, THINK_CHUNK_ID, THINK_TAG,
+    ThinkingState, process_think_blocks,
+};
 use crate::providers::helpers::{
     InjectedResponse, convert_stream_error, inject_extra_request_data_and_send,
     inject_extra_request_data_and_send_eventsource_with_headers,
@@ -141,6 +145,7 @@ pub struct OpenAIProvider {
     provider_tools: Vec<Value>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     content_type_overrides: HashMap<String, ContentBlockType>,
+    parse_think_tags_from_content: bool,
 }
 
 impl OpenAIProvider {
@@ -152,6 +157,7 @@ impl OpenAIProvider {
         include_encrypted_reasoning: bool,
         provider_tools: Vec<Value>,
         content_type_overrides: HashMap<String, ContentBlockType>,
+        parse_think_tags_from_content: bool,
     ) -> Result<Self, Error> {
         if !matches!(api_type, OpenAIAPIType::Responses) && include_encrypted_reasoning {
             return Err(Error::new(ErrorDetails::Config {
@@ -180,6 +186,7 @@ impl OpenAIProvider {
 
             provider_tools,
             content_type_overrides,
+            parse_think_tags_from_content,
         })
     }
 
@@ -406,6 +413,7 @@ impl WrappedProvider for OpenAIProvider {
                     raw_request,
                     generic_request: request,
                     model_inference_id,
+                    parse_think_tags_from_content: self.parse_think_tags_from_content,
                 }
                 .try_into()
             }
@@ -428,6 +436,7 @@ impl WrappedProvider for OpenAIProvider {
             start_time,
             None,
             raw_request,
+            self.parse_think_tags_from_content,
         )
     }
 }
@@ -547,6 +556,7 @@ impl InferenceProvider for OpenAIProvider {
                         raw_request: raw_request.clone(),
                         generic_request: request.request,
                         model_inference_id: request.model_inference_id,
+                        parse_think_tags_from_content: self.parse_think_tags_from_content,
                     }
                     .try_into()?)
                 }
@@ -721,6 +731,7 @@ impl InferenceProvider for OpenAIProvider {
                     start_time,
                     request_id,
                     &raw_request,
+                    self.parse_think_tags_from_content,
                 )
                 .peekable();
                 Ok((stream, raw_request))
@@ -1119,12 +1130,14 @@ pub fn stream_openai(
     start_time: Instant,
     request_id: Option<String>,
     raw_request: &str,
+    parse_think_tags_from_content: bool,
 ) -> ProviderInferenceResponseStreamInner {
     let raw_request = raw_request.to_string();
     let mut saw_content_block = false;
     let mut encountered_error = false;
     let mut tool_call_ids = Vec::new();
     let mut claude_xml_state = ClaudeXmlStreamState::default();
+    let mut thinking_state = ThinkingState::Normal;
     Box::pin(async_stream::stream! {
         futures::pin_mut!(event_source);
         while let Some(ev) = event_source.next().await {
@@ -1203,6 +1216,8 @@ pub fn stream_openai(
                                 latency,
                                 &mut tool_call_ids,
                                 &mut claude_xml_state,
+                                &mut thinking_state,
+                                parse_think_tags_from_content,
                                 model_inference_id,
                                 &provider_type,
                             )
@@ -2885,6 +2900,7 @@ struct OpenAIResponseWithMetadata<'a> {
     generic_request: &'a ModelInferenceRequest<'a>,
     raw_response: String,
     model_inference_id: Uuid,
+    parse_think_tags_from_content: bool,
 }
 
 impl<'a> TryFrom<OpenAIResponseWithMetadata<'a>> for ProviderInferenceResponse {
@@ -2897,6 +2913,7 @@ impl<'a> TryFrom<OpenAIResponseWithMetadata<'a>> for ProviderInferenceResponse {
             raw_response,
             generic_request,
             model_inference_id,
+            parse_think_tags_from_content,
         } = value;
         if response.choices.len() != 1 {
             return Err(ErrorDetails::InferenceServer {
@@ -2932,21 +2949,17 @@ impl<'a> TryFrom<OpenAIResponseWithMetadata<'a>> for ProviderInferenceResponse {
                 signature: None,
                 summary: None,
                 provider_type: Some(PROVIDER_TYPE.to_string()),
-                extra_data: None,
+                extra_data: Some(reasoning_field_metadata()),
             }));
         }
         let mut recovered_claude_xml_tool_call = false;
         if let Some(text) = message.content {
-            let consumed = recover_claude_xml_tool_calls(&text, model_inference_id);
-            if !consumed.text_passthrough.is_empty() {
-                content.push(consumed.text_passthrough.into());
-            }
-            recovered_claude_xml_tool_call = !consumed.tool_calls.is_empty();
-            for tool_call in consumed.tool_calls {
-                content.push(ContentBlockOutput::ToolCall(tool_call_chunk_to_tool_call(
-                    tool_call,
-                )));
-            }
+            recovered_claude_xml_tool_call = append_openai_message_text_output(
+                &text,
+                parse_think_tags_from_content,
+                model_inference_id,
+                &mut content,
+            )?;
         }
         if let Some(tool_calls) = message.tool_calls {
             for tool_call in tool_calls {
@@ -3056,6 +3069,140 @@ struct OpenAIChatChunk {
     usage: Option<OpenAIUsage>,
 }
 
+fn think_tags_metadata() -> serde_json::Value {
+    serde_json::json!({"reasoning_format": "think_tags"})
+}
+
+fn reasoning_field_metadata() -> serde_json::Value {
+    serde_json::json!({"reasoning_format": "reasoning_field"})
+}
+
+fn push_openai_thought_chunk(content: &mut Vec<ContentBlockChunk>, text: String, id: &str) {
+    content.push(ContentBlockChunk::Thought(ThoughtChunk {
+        text: Some(text),
+        signature: None,
+        provider_type: Some(PROVIDER_TYPE.to_string()),
+        id: id.to_string(),
+        summary_id: None,
+        summary_text: None,
+        extra_data: Some(think_tags_metadata()),
+    }));
+}
+
+fn push_openai_delta_text_with_think_tags(
+    text: &str,
+    parse_think_tags: bool,
+    thinking_state: &mut ThinkingState,
+    provider_type: &str,
+    api_type: ApiType,
+    content: &mut Vec<ContentBlockChunk>,
+) -> Result<(), Error> {
+    if !parse_think_tags {
+        if !text.is_empty() {
+            content.push(ContentBlockChunk::Text(TextChunk {
+                text: text.to_string(),
+                id: "0".to_string(),
+            }));
+        }
+        return Ok(());
+    }
+
+    if matches!(*thinking_state, ThinkingState::Normal)
+        && text.contains(THINK_TAG)
+        && text.contains(END_THINK_TAG)
+        && text.matches(THINK_TAG).count() == 1
+        && text.matches(END_THINK_TAG).count() == 1
+    {
+        let (clean_text, extracted_reasoning) =
+            process_think_blocks(text, true, provider_type, api_type)?;
+        if let Some(reasoning) = extracted_reasoning {
+            push_openai_thought_chunk(content, reasoning, THINK_CHUNK_ID);
+            *thinking_state = ThinkingState::Finished;
+        }
+        if !clean_text.is_empty() {
+            content.push(ContentBlockChunk::Text(TextChunk {
+                text: clean_text,
+                id: thinking_state.get_id(),
+            }));
+        }
+        return Ok(());
+    }
+
+    if matches!(*thinking_state, ThinkingState::Thinking)
+        && let Some(close_idx) = text.find(END_THINK_TAG)
+    {
+        let before = &text[..close_idx];
+        let after = &text[close_idx + END_THINK_TAG_LEN..];
+        let reasoning_part = before.replace(THINK_TAG, "");
+        if !reasoning_part.is_empty() {
+            push_openai_thought_chunk(content, reasoning_part, THINK_CHUNK_ID);
+        }
+        *thinking_state = ThinkingState::Finished;
+        if !after.is_empty() {
+            content.push(ContentBlockChunk::Text(TextChunk {
+                text: after.to_string(),
+                id: thinking_state.get_id(),
+            }));
+        }
+        return Ok(());
+    }
+
+    if !thinking_state.update(text, provider_type, api_type)? {
+        match thinking_state {
+            ThinkingState::Normal | ThinkingState::Finished => {
+                if !text.is_empty() {
+                    content.push(ContentBlockChunk::Text(TextChunk {
+                        text: text.to_string(),
+                        id: thinking_state.get_id(),
+                    }));
+                }
+            }
+            ThinkingState::Thinking => {
+                if !text.is_empty() {
+                    push_openai_thought_chunk(content, text.to_string(), &thinking_state.get_id());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_openai_message_text_output(
+    raw_text: &str,
+    parse_think_tags: bool,
+    model_inference_id: Uuid,
+    content: &mut Vec<ContentBlockOutput>,
+) -> Result<bool, Error> {
+    let text = if parse_think_tags {
+        let (clean_text, extracted_reasoning) =
+            process_think_blocks(raw_text, true, PROVIDER_TYPE, ApiType::ChatCompletions)?;
+        if let Some(reasoning) = extracted_reasoning {
+            content.push(ContentBlockOutput::Thought(Thought {
+                text: Some(reasoning),
+                signature: None,
+                summary: None,
+                provider_type: Some(PROVIDER_TYPE.to_string()),
+                extra_data: Some(think_tags_metadata()),
+            }));
+        }
+        clean_text
+    } else {
+        raw_text.to_string()
+    };
+
+    let consumed = recover_claude_xml_tool_calls(&text, model_inference_id);
+    if !consumed.text_passthrough.is_empty() {
+        content.push(consumed.text_passthrough.into());
+    }
+    let recovered_claude_xml_tool_call = !consumed.tool_calls.is_empty();
+    for tool_call in consumed.tool_calls {
+        content.push(ContentBlockOutput::ToolCall(tool_call_chunk_to_tool_call(
+            tool_call,
+        )));
+    }
+    Ok(recovered_claude_xml_tool_call)
+}
+
 /// Maps an OpenAI chunk to a TensorZero chunk for streaming inferences
 fn openai_to_tensorzero_chunk(
     raw_message: String,
@@ -3063,6 +3210,8 @@ fn openai_to_tensorzero_chunk(
     latency: Duration,
     tool_call_ids: &mut Vec<String>,
     claude_xml_state: &mut ClaudeXmlStreamState,
+    thinking_state: &mut ThinkingState,
+    parse_think_tags_from_content: bool,
     model_inference_id: Uuid,
     provider_type: &str,
 ) -> Result<ProviderInferenceResponseChunk, Error> {
@@ -3092,26 +3241,26 @@ fn openai_to_tensorzero_chunk(
             finish_reason = Some(choice_finish_reason.into());
         }
         if let Some(reasoning) = choice.delta.reasoning_content {
-            // We don't have real chunk ids, so always use chunk id 1 for reasoning content
-            // (which should get concatenated into a single ContentBlock by the client)
             content.push(ContentBlockChunk::Thought(ThoughtChunk {
                 text: Some(reasoning),
                 signature: None,
                 provider_type: Some(PROVIDER_TYPE.to_string()),
-                id: "1".to_string(),
+                id: REASONING_FIELD_CHUNK_ID.to_string(),
                 summary_id: None,
                 summary_text: None,
-                extra_data: None,
+                extra_data: Some(reasoning_field_metadata()),
             }));
         }
         if let Some(text) = choice.delta.content {
             let consumed = claude_xml_state.consume(&text, false, model_inference_id);
-            if !consumed.text_passthrough.is_empty() {
-                content.push(ContentBlockChunk::Text(TextChunk {
-                    text: consumed.text_passthrough,
-                    id: "0".to_string(),
-                }));
-            }
+            push_openai_delta_text_with_think_tags(
+                &consumed.text_passthrough,
+                parse_think_tags_from_content,
+                thinking_state,
+                provider_type,
+                ApiType::ChatCompletions,
+                &mut content,
+            )?;
             for tool_call in consumed.tool_calls {
                 content.push(ContentBlockChunk::ToolCall(tool_call));
             }
@@ -3369,16 +3518,12 @@ impl TryFrom<OpenAIBatchFileRow> for ProviderBatchInferenceOutput {
         let mut content: Vec<ContentBlockOutput> = Vec::new();
         let mut recovered_claude_xml_tool_call = false;
         if let Some(text) = message.content {
-            let consumed = recover_claude_xml_tool_calls(&text, row.inference_id);
-            if !consumed.text_passthrough.is_empty() {
-                content.push(consumed.text_passthrough.into());
-            }
-            recovered_claude_xml_tool_call = !consumed.tool_calls.is_empty();
-            for tool_call in consumed.tool_calls {
-                content.push(ContentBlockOutput::ToolCall(tool_call_chunk_to_tool_call(
-                    tool_call,
-                )));
-            }
+            recovered_claude_xml_tool_call = append_openai_message_text_output(
+                &text,
+                true,
+                row.inference_id,
+                &mut content,
+            )?;
         }
         if let Some(tool_calls) = message.tool_calls {
             for tool_call in tool_calls {
@@ -3958,6 +4103,7 @@ mod tests {
             generic_request: &generic_request,
             raw_response: raw_response.clone(),
             model_inference_id: Uuid::now_v7(),
+            parse_think_tags_from_content: true,
         });
         assert!(result.is_ok());
         let inference_response = result.unwrap();
@@ -4051,6 +4197,7 @@ mod tests {
             generic_request: &generic_request,
             raw_response: raw_response.clone(),
             model_inference_id: Uuid::now_v7(),
+            parse_think_tags_from_content: true,
         });
         assert!(result.is_ok());
         let inference_response = result.unwrap();
@@ -4114,6 +4261,7 @@ mod tests {
             generic_request: &generic_request,
             raw_response: raw_response.clone(),
             model_inference_id: Uuid::now_v7(),
+            parse_think_tags_from_content: true,
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -4170,6 +4318,7 @@ mod tests {
             generic_request: &generic_request,
             raw_response: raw_response.clone(),
             model_inference_id: Uuid::now_v7(),
+            parse_think_tags_from_content: true,
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -4307,6 +4456,7 @@ mod tests {
             generic_request: &generic_request,
             raw_response: "{}".to_string(),
             model_inference_id: Uuid::nil(),
+            parse_think_tags_from_content: true,
         })
         .unwrap();
 
@@ -4457,6 +4607,8 @@ mod tests {
             Duration::from_millis(50),
             &mut tool_call_ids,
             &mut ClaudeXmlStreamState::default(),
+            &mut ThinkingState::Normal,
+            true,
             Uuid::now_v7(),
             PROVIDER_TYPE,
         )
@@ -4494,6 +4646,8 @@ mod tests {
             Duration::from_millis(50),
             &mut tool_call_ids,
             &mut ClaudeXmlStreamState::default(),
+            &mut ThinkingState::Normal,
+            true,
             Uuid::now_v7(),
             PROVIDER_TYPE,
         )
@@ -4532,6 +4686,8 @@ mod tests {
             Duration::from_millis(50),
             &mut tool_call_ids,
             &mut ClaudeXmlStreamState::default(),
+            &mut ThinkingState::Normal,
+            true,
             Uuid::now_v7(),
             PROVIDER_TYPE,
         )
@@ -4572,6 +4728,8 @@ mod tests {
             Duration::from_millis(50),
             &mut tool_call_ids,
             &mut ClaudeXmlStreamState::default(),
+            &mut ThinkingState::Normal,
+            true,
             Uuid::now_v7(),
             PROVIDER_TYPE,
         )
@@ -4620,6 +4778,8 @@ mod tests {
             Duration::from_millis(50),
             &mut tool_call_ids,
             &mut ClaudeXmlStreamState::default(),
+            &mut ThinkingState::Normal,
+            true,
             model_inference_id,
             PROVIDER_TYPE,
         )
@@ -4659,6 +4819,133 @@ mod tests {
     }
 
     #[test]
+    fn openai_to_tensorzero_chunk_parses_complete_think_tags_in_one_delta() {
+        let chunk = OpenAIChatChunk {
+            choices: vec![OpenAIChatChunkChoice {
+                delta: OpenAIDelta {
+                    content: Some(
+                        "<think>reasoning</think>answer".to_string(),
+                    ),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let mut tool_call_ids = Vec::new();
+        let mut thinking_state = ThinkingState::Normal;
+        let message = openai_to_tensorzero_chunk(
+            "raw".to_string(),
+            chunk,
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut ClaudeXmlStreamState::default(),
+            &mut thinking_state,
+            true,
+            Uuid::now_v7(),
+            PROVIDER_TYPE,
+        )
+        .unwrap();
+        assert_eq!(message.content.len(), 2);
+        let ContentBlockChunk::Thought(thought) = &message.content[0] else {
+            panic!("expected thought chunk");
+        };
+        assert_eq!(thought.text.as_deref(), Some("reasoning"));
+        assert_eq!(thought.id, THINK_CHUNK_ID);
+        let ContentBlockChunk::Text(text) = &message.content[1] else {
+            panic!("expected text chunk");
+        };
+        assert_eq!(text.text, "answer");
+        assert!(!text.text.contains(THINK_TAG));
+    }
+
+    #[test]
+    fn openai_to_tensorzero_chunk_splits_reasoning_field_and_think_tags() {
+        let chunk = OpenAIChatChunk {
+            choices: vec![OpenAIChatChunkChoice {
+                delta: OpenAIDelta {
+                    content: Some(
+                        "<think>tag reasoning</think>answer".to_string(),
+                    ),
+                    reasoning_content: Some("field reasoning".to_string()),
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let mut tool_call_ids = Vec::new();
+        let mut thinking_state = ThinkingState::Normal;
+        let message = openai_to_tensorzero_chunk(
+            "raw".to_string(),
+            chunk,
+            Duration::from_millis(1),
+            &mut tool_call_ids,
+            &mut ClaudeXmlStreamState::default(),
+            &mut thinking_state,
+            true,
+            Uuid::now_v7(),
+            PROVIDER_TYPE,
+        )
+        .unwrap();
+        assert_eq!(message.content.len(), 3);
+        let ContentBlockChunk::Thought(field) = &message.content[0] else {
+            panic!("expected reasoning field thought");
+        };
+        assert_eq!(field.id, REASONING_FIELD_CHUNK_ID);
+        assert_eq!(field.text.as_deref(), Some("field reasoning"));
+        let ContentBlockChunk::Thought(tags) = &message.content[1] else {
+            panic!("expected think-tag thought");
+        };
+        assert_eq!(tags.id, THINK_CHUNK_ID);
+        assert_eq!(tags.text.as_deref(), Some("tag reasoning"));
+    }
+
+    #[test]
+    fn openai_non_streaming_message_parses_think_tags() {
+        let response = OpenAIResponse {
+            choices: vec![OpenAIResponseChoice {
+                index: 0,
+                message: OpenAIResponseMessage {
+                    content: Some(
+                        "<think>reasoning</think>answer".to_string(),
+                    ),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: OpenAIFinishReason::Stop,
+            }],
+            usage: None,
+        };
+        let generic_request = ModelInferenceRequest {
+            function_type: FunctionType::Chat,
+            ..Default::default()
+        };
+        let result = ProviderInferenceResponse::try_from(OpenAIResponseWithMetadata {
+            response,
+            latency: Latency::NonStreaming {
+                response_time: Duration::from_millis(1),
+            },
+            raw_request: "{}".to_string(),
+            generic_request: &generic_request,
+            raw_response: "{}".to_string(),
+            model_inference_id: Uuid::now_v7(),
+            parse_think_tags_from_content: true,
+        })
+        .unwrap();
+        assert_eq!(result.output.len(), 2);
+        let ContentBlockOutput::Thought(thought) = &result.output[0] else {
+            panic!("expected thought output");
+        };
+        assert_eq!(thought.text.as_deref(), Some("reasoning"));
+        let ContentBlockOutput::Text(text) = &result.output[1] else {
+            panic!("expected text output");
+        };
+        assert_eq!(text.text, "answer");
+    }
+
+    #[test]
     fn openai_to_tensorzero_chunk_buffers_split_claude_xml_tool_call() {
         let mut state = ClaudeXmlStreamState::default();
         let mut tool_call_ids = Vec::new();
@@ -4689,12 +4976,15 @@ mod tests {
             usage: None,
         };
 
+        let mut thinking_state = ThinkingState::Normal;
         let first = openai_to_tensorzero_chunk(
             "first".to_string(),
             first_chunk,
             Duration::from_millis(1),
             &mut tool_call_ids,
             &mut state,
+            &mut thinking_state,
+            true,
             model_inference_id,
             PROVIDER_TYPE,
         )
@@ -4705,6 +4995,8 @@ mod tests {
             Duration::from_millis(2),
             &mut tool_call_ids,
             &mut state,
+            &mut thinking_state,
+            true,
             model_inference_id,
             PROVIDER_TYPE,
         )
@@ -5539,6 +5831,7 @@ mod tests {
             false,
             Vec::new(),
             HashMap::new(),
+            true,
         );
 
         let _ = OpenAIProvider::new(
@@ -5551,6 +5844,7 @@ mod tests {
             false,
             Vec::new(),
             HashMap::new(),
+            true,
         );
 
         // Invalid cases (should warn)
@@ -5563,6 +5857,7 @@ mod tests {
             false,
             Vec::new(),
             HashMap::new(),
+            true,
         );
         assert!(logs_contain("automatically appends `/chat/completions`"));
         assert!(logs_contain(invalid_url_1.as_ref()));
@@ -5576,6 +5871,7 @@ mod tests {
             false,
             Vec::new(),
             HashMap::new(),
+            true,
         );
         assert!(logs_contain("automatically appends `/chat/completions`"));
         assert!(logs_contain(invalid_url_2.as_ref()));

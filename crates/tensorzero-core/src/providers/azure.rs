@@ -353,6 +353,7 @@ impl InferenceProvider for AzureProvider {
             start_time,
             None,
             &raw_request,
+            false,
         )
         .peekable();
         Ok((stream, raw_request))

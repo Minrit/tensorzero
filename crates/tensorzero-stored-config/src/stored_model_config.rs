@@ -129,6 +129,7 @@ pub enum StoredProviderConfig {
         include_encrypted_reasoning: Option<bool>,
         provider_tools: Option<Vec<Value>>,
         content_type_overrides: Option<BTreeMap<String, StoredContentBlockType>>,
+        parse_think_tags_from_content: Option<bool>,
     },
     OpenRouter {
         model_name: String,

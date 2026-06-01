@@ -372,6 +372,7 @@ pub fn convert_to_optimizer_status(job: OpenAIFineTuningJob) -> Result<Optimizat
                     include_encrypted_reasoning: false,
                     provider_tools: Vec::new(),
                     content_type_overrides: std::collections::HashMap::new(),
+                    parse_think_tags_from_content: true,
                 },
                 extra_headers: None,
                 extra_body: None,

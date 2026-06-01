@@ -294,6 +294,7 @@ impl InferenceProvider for HyperbolicProvider {
             start_time,
             None,
             &raw_request,
+            false,
         )
         .peekable();
         Ok((stream, raw_request))

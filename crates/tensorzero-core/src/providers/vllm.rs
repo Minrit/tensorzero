@@ -284,6 +284,7 @@ impl InferenceProvider for VLLMProvider {
             start_time,
             None,
             &raw_request,
+            false,
         )
         .peekable();
         Ok((stream, raw_request))
