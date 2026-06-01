@@ -211,6 +211,9 @@ fn skip_ws(text: &str, mut cursor: usize) -> usize {
 fn suspected_open_prefix_len(buffer: &str) -> usize {
     let max_len = OPEN_FUNCTION_CALLS.len().min(buffer.len());
     for len in (1..=max_len).rev() {
+        if !buffer.is_char_boundary(buffer.len() - len) {
+            continue;
+        }
         let tail = &buffer[buffer.len() - len..];
         if OPEN_FUNCTION_CALLS.starts_with(tail) {
             return len;
@@ -279,5 +282,19 @@ mod tests {
         assert!(first.tool_calls.is_empty());
         assert_eq!(second.text_passthrough, " after");
         assert_eq!(second.tool_calls[0].raw_name.as_deref(), Some("Task"));
+    }
+
+    #[test]
+    fn stream_state_handles_multibyte_text_before_non_tool_xml() {
+        let mut state = ClaudeXmlStreamState::default();
+        let id = Uuid::nil();
+
+        let consumed = state.consume("<think>\nThe user said \"你好\" which means hello", false, id);
+
+        assert_eq!(
+            consumed.text_passthrough,
+            "<think>\nThe user said \"你好\" which means hello"
+        );
+        assert!(consumed.tool_calls.is_empty());
     }
 }
