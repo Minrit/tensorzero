@@ -375,7 +375,10 @@ fn suspected_open_prefix_len(buffer: &str) -> usize {
         .max()
         .unwrap_or(0)
         .min(buffer.len());
-    for len in (1..=max_len).rev() {
+    for len in (1..=max_len)
+        .rev()
+        .filter(|len| buffer.is_char_boundary(buffer.len() - len))
+    {
         let tail = &buffer[buffer.len() - len..];
         if open_tokens.iter().any(|token| token.starts_with(tail)) {
             return len;
@@ -530,6 +533,22 @@ mod tests {
         assert_eq!(state.pending, "<｜DSML");
         let second = state.consume(
             "｜tool_calls><｜DSML｜invoke name=\"glob\"><｜DSML｜parameter name=\"pattern\" string=\"true\">/x</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>",
+            false,
+            test_uuid(),
+        );
+        assert_eq!(second.text_passthrough, "");
+        assert_eq!(second.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn holds_split_double_pipe_open_marker_without_utf8_boundary_panic() {
+        let mut state = DsmlStreamState::default();
+        let first = state.consume("<｜｜DSML｜｜tool_s", false, test_uuid());
+        assert_eq!(first.text_passthrough, "");
+        assert_eq!(state.pending, "<｜｜DSML｜｜tool_s");
+
+        let second = state.consume(
+            "calls><｜｜DSML｜｜invoke name=\"glob\"><｜｜DSML｜｜parameter name=\"pattern\" string=\"true\">/x</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>",
             false,
             test_uuid(),
         );
